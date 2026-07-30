@@ -58,6 +58,14 @@ Returns: Result object with success status, new order status, and audit record I
           ),
       },
 
+      outputSchema: {
+        success: z.boolean(),
+        orderId: z.string(),
+        message: z.string().optional(),
+        newStatus: z.string().optional(),
+        auditId: z.string().optional(),
+      },
+
       annotations: {
         readOnlyHint: false,
         destructiveHint: false,
@@ -145,6 +153,25 @@ Returns: For dry_run=true â€” preview with impact and risk. For dry_run=false â€
             "If true (default), returns a preview of the change without executing it. Set to false to actually apply the change.",
           ),
       },
+
+      outputSchema: z.discriminatedUnion("dryRun", [
+        z.object({
+          dryRun: z.literal(true),
+          orderId: z.string(),
+          currentStatus: z.string(),
+          proposedStatus: z.string(),
+          impact: z.string(),
+          riskLevel: z.enum(["high", "medium", "low"]),
+        }),
+        z.object({
+          dryRun: z.literal(false),
+          success: z.boolean(),
+          orderId: z.string(),
+          previousStatus: z.string().optional(),
+          newStatus: z.string().optional(),
+          auditId: z.string().optional(),
+        }),
+      ]),
 
       annotations: {
         readOnlyHint: false,

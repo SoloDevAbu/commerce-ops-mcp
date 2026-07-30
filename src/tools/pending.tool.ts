@@ -54,6 +54,21 @@ Returns: Grouped list of pending investigations with order IDs, customer emails,
           ),
       },
 
+      outputSchema: {
+        count: z.number(),
+        items: z.array(
+          z.object({
+            orderId: z.string(),
+            customerEmail: z.string(),
+            amount: z.number(),
+            currency: z.string(),
+            issueCategory: z.enum(["payment_mismatch", "fulfillment_failure", "stuck_processing", "fulfillment_delay"]),
+            issueSummary: z.string(),
+            stuckSince: z.string().nullable().optional(),
+          }),
+        ),
+      },
+
       annotations: {
         readOnlyHint: true,
         destructiveHint: false,

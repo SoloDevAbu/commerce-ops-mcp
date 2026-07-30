@@ -45,6 +45,30 @@ Do NOT use this tool to make changes — use commerce_retry_fulfillment_processi
           ),
       },
 
+      outputSchema: {
+        orderId: z.string(),
+        summary: z.string(),
+        rootCause: z.string(),
+        evidence: z.array(
+          z.object({
+            label: z.string(),
+            status: z.enum(["pass", "fail", "unknown"]),
+            detail: z.string().optional(),
+          }),
+        ),
+        timeline: z.array(
+          z.object({
+            timestamp: z.string(),
+            eventType: z.string(),
+            description: z.string(),
+          }),
+        ),
+        confidence: z.enum(["high", "medium", "low"]),
+        recommendedNextStep: z.string(),
+        riskLevel: z.enum(["high", "medium", "low"]),
+        automationEligible: z.boolean(),
+      },
+
       annotations: {
         readOnlyHint: true,
         destructiveHint: false,
