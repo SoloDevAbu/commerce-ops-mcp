@@ -10,6 +10,7 @@
  * Every write is wrapped in a transaction and always appends to audit_log.
  */
 
+import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { db } from "../db";
 import {
@@ -17,8 +18,8 @@ import {
   payments,
   fulfillment,
   orderEvents,
-  auditLog,
 } from "../db/schema";
+import { writeAudit } from "../lib/audit.js";
 import {
   OrderNotFoundError,
   InvalidStateError,
@@ -26,10 +27,6 @@ import {
   type RetryResult,
   type StatusUpdateResult,
 } from "../types";
-
-function generateId(prefix: string): string {
-  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
-}
 
 /**
  * Valid source statuses that permit a fulfillment retry.
@@ -98,8 +95,7 @@ export async function retryFulfillmentProcessing(
   }
 
   // Execute recovery
-  const eventId = generateId("EVT");
-  const auditId = generateId("AUD");
+  const eventId = randomUUID();
 
   // Update fulfillment record
   if (ful) {
@@ -114,7 +110,7 @@ export async function retryFulfillmentProcessing(
       .where(eq(fulfillment.orderId, orderId));
   } else {
     await db.insert(fulfillment).values({
-      id: generateId("FUL"),
+      id: randomUUID(),
       orderId,
       status: "processing",
       startedAt: now,
@@ -137,14 +133,12 @@ export async function retryFulfillmentProcessing(
     createdAt: now,
   });
 
-  // Write audit record
-  await db.insert(auditLog).values({
-    id: auditId,
+  // Write audit record — centralized through writeAudit()
+  await writeAudit({
     orderId,
     action: "retry_fulfillment",
     reason,
     outcome: "Fulfillment restarted — status set to processing",
-    performedAt: now,
   });
 
   return {
@@ -155,7 +149,7 @@ export async function retryFulfillmentProcessing(
       `The order is now in "processing" state. ` +
       `Monitor for a status update from the delivery partner.`,
     newStatus: "processing",
-    auditId,
+    auditId: "(see audit_log)",
   };
 }
 
@@ -241,8 +235,7 @@ export async function updateOrderStatus(
 
   // Execute update
   const now = new Date().toISOString();
-  const auditId = generateId("AUD");
-  const eventId = generateId("EVT");
+  const eventId = randomUUID();
 
   const previousStatus = order.status;
 
@@ -263,13 +256,11 @@ export async function updateOrderStatus(
     createdAt: now,
   });
 
-  await db.insert(auditLog).values({
-    id: auditId,
+  await writeAudit({
     orderId,
     action: "update_order_status",
     reason,
     outcome: `Status changed from "${previousStatus}" to "${newStatus}"`,
-    performedAt: now,
   });
 
   return {
@@ -278,6 +269,6 @@ export async function updateOrderStatus(
     orderId,
     previousStatus,
     newStatus,
-    auditId,
+    auditId: "(see audit_log)",
   };
 }

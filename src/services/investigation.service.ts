@@ -117,6 +117,40 @@ export async function investigateOrder(
     };
   }
 
+  // 1b. Payment failed — order correctly held, system behaving as expected
+  if (
+    payment &&
+    payment.internalStatus === "failed" &&
+    order.status === "pending"
+  ) {
+    const evidence: EvidenceItem[] = [
+      {
+        label: "Payment Captured",
+        status: "fail",
+        detail: `Payment status: ${payment.internalStatus}`,
+      },
+      { label: "Fulfillment Started", status: "fail", detail: "Correctly blocked — payment not captured" },
+    ];
+
+    return {
+      orderId,
+      summary:
+        `Payment was declined or failed. The order is correctly held in pending state — ` +
+        `no fulfillment was triggered, which is the expected behaviour.`,
+      rootCause:
+        "The payment gateway reported a failed transaction. " +
+        "The system correctly blocked fulfillment and left the order in pending status.",
+      evidence,
+      timeline,
+      confidence: "high",
+      recommendedNextStep:
+        "No action needed — the system is behaving correctly. " +
+        "Notify the customer that their payment was declined and invite them to retry with a different payment method.",
+      riskLevel: "low",
+      automationEligible: false,
+    };
+  }
+
   // 2. Payment not yet captured (pending)
   if (payment && payment.internalStatus === "pending") {
     const evidence: EvidenceItem[] = [
