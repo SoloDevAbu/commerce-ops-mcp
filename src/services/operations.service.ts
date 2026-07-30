@@ -4,9 +4,14 @@
  * Provides fleet-level views of the order operation:
  *  - listPendingInvestigations: orders that need attention, grouped by issue
  *  - getOperationsSummary: aggregate metrics + recent audit trail
+ *
+ * ID strategy:
+ *  - Internal maps use order.id (UUID) as key for FK correlation
+ *  - All returned PendingInvestigation objects expose order.orderId (human-readable)
+ *  - Audit entries are joined with orders to resolve UUID → human-readable orderId
  */
 
-import { ne, and, gt, desc } from "drizzle-orm";
+import { ne, and, gt, desc, eq } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { orders, payments, fulfillment, auditLog } from "../db/schema.js";
 import type {
@@ -43,15 +48,15 @@ export async function listPendingInvestigations(opts?: {
     .from(orders)
     .where(and(ne(orders.status, "fulfilled"), ne(orders.status, "cancelled")));
 
-  // Fetch related data in parallel
-  const orderIds = openOrders.map((o) => o.id);
-  if (orderIds.length === 0) return [];
+  if (openOrders.length === 0) return [];
 
+  // Fetch related data in parallel (all payments and fulfillments)
   const [allPayments, allFulfillments] = await Promise.all([
     db.select().from(payments),
     db.select().from(fulfillment),
   ]);
 
+  // Key maps by UUID (orders.id) — the FK stored in child tables
   const paymentByOrder = new Map(allPayments.map((p) => [p.orderId, p]));
   const fulfillmentByOrder = new Map(
     allFulfillments.map((f) => [f.orderId, f]),
@@ -60,6 +65,7 @@ export async function listPendingInvestigations(opts?: {
   const results: PendingInvestigation[] = [];
 
   for (const order of openOrders) {
+    // Use UUID (order.id) to correlate with child records
     const payment = paymentByOrder.get(order.id);
     const ful = fulfillmentByOrder.get(order.id);
 
@@ -118,7 +124,8 @@ export async function listPendingInvestigations(opts?: {
     if (opts?.issueCategory && opts.issueCategory !== issueCategory) continue;
 
     results.push({
-      orderId: order.id,
+      // Return human-readable orderId for display — not the internal UUID
+      orderId: order.orderId,
       issueCategory,
       issueSummary,
       amount: order.amount,
@@ -151,9 +158,18 @@ export async function getOperationsSummary(
   const [allOrders, pendingItems, recentAudit] = await Promise.all([
     db.select().from(orders).where(gt(orders.createdAt, cutoff)),
     listPendingInvestigations({ limit: 1000 }), // Get all for counting
+    // Join audit_log with orders to resolve UUID → human-readable orderId
     db
-      .select()
+      .select({
+        id: auditLog.id,
+        orderId: orders.orderId, // human-readable from the join
+        action: auditLog.action,
+        reason: auditLog.reason,
+        outcome: auditLog.outcome,
+        performedAt: auditLog.performedAt,
+      })
       .from(auditLog)
+      .innerJoin(orders, eq(auditLog.orderId, orders.id))
       .where(gt(auditLog.performedAt, cutoff))
       .orderBy(desc(auditLog.performedAt))
       .limit(10),
@@ -173,7 +189,7 @@ export async function getOperationsSummary(
 
   const auditEntries: AuditEntry[] = recentAudit.map((a) => ({
     id: a.id,
-    orderId: a.orderId,
+    orderId: a.orderId, // already resolved to human-readable via join
     action: a.action,
     reason: a.reason,
     outcome: a.outcome,

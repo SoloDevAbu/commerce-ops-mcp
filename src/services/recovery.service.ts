@@ -8,6 +8,12 @@
  *    audit trail
  *
  * Every write is wrapped in a transaction and always appends to audit_log.
+ *
+ * ID strategy:
+ *  - Accepts human-readable orderId (e.g. "ORD-1047") from MCP tools
+ *  - Resolves to internal UUID via orders.order_id lookup
+ *  - Uses UUID for all DB writes and FK references
+ *  - Returns human-readable orderId in all result objects
  */
 
 import { randomUUID } from "node:crypto";
@@ -38,15 +44,21 @@ export async function retryFulfillmentProcessing(
 ): Promise<RetryResult> {
   const now = new Date().toISOString();
 
-  // Fetch order and related records
-  const [orderRows, paymentRows, fulfillmentRows] = await Promise.all([
-    db.select().from(orders).where(eq(orders.id, orderId)),
-    db.select().from(payments).where(eq(payments.orderId, orderId)),
-    db.select().from(fulfillment).where(eq(fulfillment.orderId, orderId)),
-  ]);
+  // Step 1: Resolve human-readable orderId → internal UUID
+  const orderRows = await db
+    .select()
+    .from(orders)
+    .where(eq(orders.orderId, orderId));
 
   const order = orderRows[0];
   if (!order) throw new OrderNotFoundError(orderId);
+
+  // Step 2: Fetch related records using UUID
+  const internalId = order.id;
+  const [paymentRows, fulfillmentRows] = await Promise.all([
+    db.select().from(payments).where(eq(payments.orderId, internalId)),
+    db.select().from(fulfillment).where(eq(fulfillment.orderId, internalId)),
+  ]);
 
   const payment = paymentRows[0];
   const ful = fulfillmentRows[0];
@@ -89,10 +101,7 @@ export async function retryFulfillmentProcessing(
     throw new InventoryUnavailableError(orderId);
   }
 
-  // Execute recovery
-  const eventId = randomUUID();
-
-  // Update fulfillment record
+  // Execute recovery — all writes use internalId (UUID)
   if (ful) {
     await db
       .update(fulfillment)
@@ -102,11 +111,11 @@ export async function retryFulfillmentProcessing(
         startedAt: now,
         updatedAt: now,
       })
-      .where(eq(fulfillment.orderId, orderId));
+      .where(eq(fulfillment.orderId, internalId));
   } else {
     await db.insert(fulfillment).values({
       id: randomUUID(),
-      orderId,
+      orderId: internalId,
       status: "processing",
       startedAt: now,
       updatedAt: now,
@@ -117,20 +126,20 @@ export async function retryFulfillmentProcessing(
   await db
     .update(orders)
     .set({ status: "processing", updatedAt: now, stuckSince: null })
-    .where(eq(orders.id, orderId));
+    .where(eq(orders.id, internalId));
 
   // Append event to timeline
   await db.insert(orderEvents).values({
-    id: eventId,
-    orderId,
+    id: randomUUID(),
+    orderId: internalId,
     eventType: "fulfillment_retried",
     description: `Fulfillment retried by operations. Reason: ${reason}`,
     createdAt: now,
   });
 
-  // Write audit record — centralized through writeAudit()
+  // Write audit record — pass UUID as FK
   await writeAudit({
-    orderId,
+    orderId: internalId,
     action: "retry_fulfillment",
     reason,
     outcome: "Fulfillment restarted — status set to processing",
@@ -138,9 +147,9 @@ export async function retryFulfillmentProcessing(
 
   return {
     success: true,
-    orderId,
+    orderId: order.orderId, // human-readable in response
     message:
-      `Fulfillment processing has been restarted for ${orderId}. ` +
+      `Fulfillment processing has been restarted for ${order.orderId}. ` +
       `The order is now in "processing" state. ` +
       `Monitor for a status update from the delivery partner.`,
     newStatus: "processing",
@@ -192,10 +201,11 @@ export async function updateOrderStatus(
   reason: string,
   dryRun: boolean = true,
 ): Promise<StatusUpdateResult> {
+  // Step 1: Resolve human-readable orderId → internal UUID
   const orderRows = await db
     .select()
     .from(orders)
-    .where(eq(orders.id, orderId));
+    .where(eq(orders.orderId, orderId));
 
   const order = orderRows[0];
   if (!order) throw new OrderNotFoundError(orderId);
@@ -220,7 +230,7 @@ export async function updateOrderStatus(
   if (dryRun) {
     return {
       dryRun: true,
-      orderId,
+      orderId: order.orderId, // human-readable
       currentStatus: order.status,
       proposedStatus: newStatus,
       impact,
@@ -228,10 +238,9 @@ export async function updateOrderStatus(
     };
   }
 
-  // Execute update
+  // Execute update — all writes use internalId (UUID)
+  const internalId = order.id;
   const now = new Date().toISOString();
-  const eventId = randomUUID();
-
   const previousStatus = order.status;
 
   await db
@@ -241,18 +250,19 @@ export async function updateOrderStatus(
       updatedAt: now,
       stuckSince: newStatus === "stuck" ? now : null,
     })
-    .where(eq(orders.id, orderId));
+    .where(eq(orders.id, internalId));
 
   await db.insert(orderEvents).values({
-    id: eventId,
-    orderId,
+    id: randomUUID(),
+    orderId: internalId,
     eventType: "status_updated",
     description: `Status manually updated: "${previousStatus}" → "${newStatus}". Reason: ${reason}`,
     createdAt: now,
   });
 
+  // Write audit record — pass UUID as FK
   await writeAudit({
-    orderId,
+    orderId: internalId,
     action: "update_order_status",
     reason,
     outcome: `Status changed from "${previousStatus}" to "${newStatus}"`,
@@ -261,7 +271,7 @@ export async function updateOrderStatus(
   return {
     dryRun: false,
     success: true,
-    orderId,
+    orderId: order.orderId, // human-readable in response
     previousStatus,
     newStatus,
     auditId: "(see audit_log)",

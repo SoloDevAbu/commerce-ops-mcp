@@ -1,10 +1,12 @@
 /**
  * Investigation Service
  *
- * The core intelligence layer of the MCP server. Given an order ID, this
- * service correlates data across all five tables (orders, payments, fulfillment,
- * order_events, audit_log) and returns a structured InvestigationReport — not
- * raw data.
+ * The core intelligence layer of the MCP server. Given a human-readable
+ * orderId (e.g. "ORD-1047"), this service:
+ *  1. Resolves orderId → internal UUID via orders.order_id
+ *  2. Correlates data across all five tables (orders, payments, fulfillment,
+ *     order_events, audit_log) using the UUID for FK lookups
+ *  3. Returns a structured InvestigationReport — not raw data.
  *
  * Design principle: the MCP is the reasoner, not just a data relay.
  */
@@ -39,24 +41,28 @@ function hasDuplicateEvents(
 export async function investigateOrder(
   orderId: string,
 ): Promise<InvestigationReport> {
-  // Fetch all related records in parallel
-  const [orderRows, paymentRows, fulfillmentRows, eventRows] =
-    await Promise.all([
-      db.select().from(orders).where(eq(orders.id, orderId)),
-      db.select().from(payments).where(eq(payments.orderId, orderId)),
-      db.select().from(fulfillment).where(eq(fulfillment.orderId, orderId)),
-      db
-        .select()
-        .from(orderEvents)
-        .where(eq(orderEvents.orderId, orderId))
-        .orderBy(asc(orderEvents.createdAt)),
-    ]);
+  // Step 1: Resolve human-readable orderId → internal UUID
+  const orderRows = await db
+    .select()
+    .from(orders)
+    .where(eq(orders.orderId, orderId));
 
-  // Guard: order must exist
   const order = orderRows[0];
   if (!order) {
     throw new OrderNotFoundError(orderId);
   }
+
+  // Step 2: Use the internal UUID for all FK-based lookups (in parallel)
+  const internalId = order.id;
+  const [paymentRows, fulfillmentRows, eventRows] = await Promise.all([
+    db.select().from(payments).where(eq(payments.orderId, internalId)),
+    db.select().from(fulfillment).where(eq(fulfillment.orderId, internalId)),
+    db
+      .select()
+      .from(orderEvents)
+      .where(eq(orderEvents.orderId, internalId))
+      .orderBy(asc(orderEvents.createdAt)),
+  ]);
 
   const payment = paymentRows[0];
   const ful = fulfillmentRows[0];
@@ -69,6 +75,7 @@ export async function investigateOrder(
   }));
 
   // Decision tree
+  // All report objects use the human-readable orderId (order.orderId), not the UUID.
 
   // 1. Payment status mismatch (highest priority — financial risk)
   if (
@@ -97,7 +104,7 @@ export async function investigateOrder(
     ];
 
     return {
-      orderId,
+      orderId: order.orderId,
       summary:
         `Payment status divergence detected. Internal system recorded "${payment.internalStatus}" ` +
         `but the payment provider reports "${payment.providerStatus}". ` +
@@ -137,7 +144,7 @@ export async function investigateOrder(
     ];
 
     return {
-      orderId,
+      orderId: order.orderId,
       summary:
         `Payment was declined or failed. The order is correctly held in pending state — ` +
         `no fulfillment was triggered, which is the expected behaviour.`,
@@ -170,7 +177,7 @@ export async function investigateOrder(
     const stalePayment = hoursWaiting > 1;
 
     return {
-      orderId,
+      orderId: order.orderId,
       summary:
         `Payment has not been captured after ${hoursWaiting.toFixed(1)} hours. ` +
         `No fulfillment has been initiated.`,
@@ -209,7 +216,7 @@ export async function investigateOrder(
     ];
 
     return {
-      orderId,
+      orderId: order.orderId,
       summary:
         `Payment was captured successfully but fulfillment failed. ` +
         (ful.failureReason
@@ -255,7 +262,7 @@ export async function investigateOrder(
     ];
 
     return {
-      orderId,
+      orderId: order.orderId,
       summary:
         `Payment was captured ${hoursElapsed.toFixed(1)} hours ago. ` +
         `Inventory was${hasInventoryEvent ? "" : " not"} reserved. ` +
@@ -313,7 +320,7 @@ export async function investigateOrder(
     ];
 
     return {
-      orderId,
+      orderId: order.orderId,
       summary:
         `Order has been stuck in processing for ${stuckHours.toFixed(1)} hours with no progress. ` +
         (hasDuplicateFulfillment
@@ -352,7 +359,7 @@ export async function investigateOrder(
       ];
 
       return {
-        orderId,
+        orderId: order.orderId,
         summary:
           `Fulfillment is in progress but has not received an update from the delivery ` +
           `partner for ${delayHours.toFixed(1)} hours.`,
@@ -386,7 +393,7 @@ export async function investigateOrder(
   ];
 
   return {
-    orderId,
+    orderId: order.orderId,
     summary: `Order is in a healthy state. Current status: ${order.status}.`,
     rootCause: "No operational issue detected.",
     evidence,
