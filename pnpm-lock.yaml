@@ -17,9 +17,6 @@ importers:
       '@neondatabase/serverless':
         specifier: ^1.1.0
         version: 1.1.0
-      better-sqlite3:
-        specifier: ^13.0.2
-        version: 13.0.2
       cross-env:
         specifier: ^7.0.3
         version: 7.0.3
@@ -36,9 +33,6 @@ importers:
         specifier: ^4.4.3
         version: 4.4.3
     devDependencies:
-      '@types/better-sqlite3':
-        specifier: ^7.6.13
-        version: 7.6.13
       '@types/node':
         specifier: ^26.1.2
         version: 26.1.2
@@ -1969,6 +1963,7 @@ snapshots:
   '@types/better-sqlite3@7.6.13':
     dependencies:
       '@types/node': 26.1.2
+    optional: true
 
   '@types/chai@5.2.3':
     dependencies:
@@ -2114,6 +2109,7 @@ snapshots:
   better-sqlite3@13.0.2:
     dependencies:
       node-addon-api: 8.9.0
+    optional: true
 
   body-parser@2.3.0:
     dependencies:
@@ -2556,7 +2552,8 @@ snapshots:
 
   negotiator@1.0.0: {}
 
-  node-addon-api@8.9.0: {}
+  node-addon-api@8.9.0:
+    optional: true
 
   object-assign@4.1.1: {}
 
