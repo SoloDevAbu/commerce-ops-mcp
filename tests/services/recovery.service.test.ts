@@ -1,0 +1,413 @@
+/**
+ * Unit tests for retryFulfillmentProcessing() and updateOrderStatus().
+ * The database and audit writer are fully mocked.
+ */
+
+import { describe, it, expect, vi, beforeEach } from "vitest";
+import {
+  OrderNotFoundError,
+  InvalidStateError,
+  InventoryUnavailableError,
+} from "../../src/types.js";
+
+const mockDbSelect = vi.fn();
+const mockDbUpdate = vi.fn();
+const mockDbInsert = vi.fn();
+const mockDbSet = vi.fn();
+const mockDbWhere = vi.fn();
+const mockDbValues = vi.fn();
+
+vi.mock("../../src/db/index.js", () => ({
+  db: {
+    select: mockDbSelect,
+    update: mockDbUpdate,
+    insert: mockDbInsert,
+  },
+}));
+
+// Mock: audit writer
+const mockWriteAudit = vi.fn().mockResolvedValue(undefined);
+vi.mock("../../src/lib/audit.js", () => ({
+  writeAudit: mockWriteAudit,
+}));
+
+// Helpers
+function makeOrder(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "uuid-order-1",
+    orderId: "ORD-1001",
+    status: "stuck",
+    customerEmail: "test@example.com",
+    amount: 2500,
+    currency: "INR",
+    items: "[]",
+    createdAt: new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString(),
+    updatedAt: new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString(),
+    stuckSince: new Date(Date.now() - 5 * 60 * 60 * 1000).toISOString(),
+    ...overrides,
+  };
+}
+
+function makePayment(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "uuid-payment-1",
+    orderId: "uuid-order-1",
+    internalStatus: "captured",
+    providerStatus: "captured",
+    amount: 2500,
+    currency: "INR",
+    capturedAt: new Date().toISOString(),
+    ...overrides,
+  };
+}
+
+function makeFulfillment(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "uuid-fulfillment-1",
+    orderId: "uuid-order-1",
+    status: "failed",
+    failureReason: null,
+    startedAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    ...overrides,
+  };
+}
+
+// Configures the select mock for retryFulfillmentProcessing:
+//   call 1 -> orders rows
+//   call 2 -> payment rows  (Promise.all)
+//   call 3 -> fulfillment rows (Promise.all)
+function setupSelectMock({
+  orderRows = [makeOrder()],
+  paymentRows = [makePayment()],
+  fulfillRows = [makeFulfillment()],
+}: {
+  orderRows?: ReturnType<typeof makeOrder>[];
+  paymentRows?: ReturnType<typeof makePayment>[];
+  fulfillRows?: ReturnType<typeof makeFulfillment>[];
+} = {}) {
+  const ordersChain = {
+    from: vi.fn().mockReturnThis(),
+    where: vi.fn().mockResolvedValue(orderRows),
+  };
+  const paymentsChain = {
+    from: vi.fn().mockReturnThis(),
+    where: vi.fn().mockResolvedValue(paymentRows),
+  };
+  const fulfillChain = {
+    from: vi.fn().mockReturnThis(),
+    where: vi.fn().mockResolvedValue(fulfillRows),
+  };
+
+  mockDbSelect
+    .mockReturnValueOnce(ordersChain)
+    .mockReturnValueOnce(paymentsChain)
+    .mockReturnValueOnce(fulfillChain);
+}
+
+// Configures update and insert chains (used in write operations)
+function setupWriteMocks() {
+  const updateChain = {
+    set: vi.fn().mockReturnThis(),
+    where: vi.fn().mockResolvedValue([]),
+  };
+  const insertChain = { values: vi.fn().mockResolvedValue([]) };
+  mockDbUpdate.mockReturnValue(updateChain);
+  mockDbInsert.mockReturnValue(insertChain);
+  return { updateChain, insertChain };
+}
+
+describe("retryFulfillmentProcessing", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  async function getService() {
+    const mod = await import("../../src/services/recovery.service.js");
+    return mod.retryFulfillmentProcessing;
+  }
+
+  it("throws OrderNotFoundError when order does not exist", async () => {
+    const ordersChain = {
+      from: vi.fn().mockReturnThis(),
+      where: vi.fn().mockResolvedValue([]),
+    };
+    mockDbSelect.mockReturnValueOnce(ordersChain);
+
+    const retry = await getService();
+    await expect(retry("ORD-NONE", "test")).rejects.toThrow(OrderNotFoundError);
+  });
+
+  it("throws InvalidStateError when order is in non-retryable status (fulfilled)", async () => {
+    setupSelectMock({ orderRows: [makeOrder({ status: "fulfilled" })] });
+
+    const retry = await getService();
+    await expect(retry("ORD-1001", "test")).rejects.toThrow(InvalidStateError);
+  });
+
+  it("throws InvalidStateError when order is in non-retryable status (cancelled)", async () => {
+    setupSelectMock({ orderRows: [makeOrder({ status: "cancelled" })] });
+
+    const retry = await getService();
+    await expect(retry("ORD-1001", "test")).rejects.toThrow(InvalidStateError);
+  });
+
+  it("throws InvalidStateError when payment is not captured", async () => {
+    setupSelectMock({
+      paymentRows: [makePayment({ internalStatus: "pending" })],
+    });
+
+    const retry = await getService();
+    await expect(retry("ORD-1001", "test")).rejects.toThrow(InvalidStateError);
+  });
+
+  it("throws InvalidStateError when payment is missing", async () => {
+    setupSelectMock({ paymentRows: [] });
+
+    const retry = await getService();
+    await expect(retry("ORD-1001", "test")).rejects.toThrow(InvalidStateError);
+  });
+
+  it("throws InvalidStateError when fulfillment is already processing", async () => {
+    setupSelectMock({
+      fulfillRows: [makeFulfillment({ status: "processing" })],
+    });
+
+    const retry = await getService();
+    await expect(retry("ORD-1001", "test")).rejects.toThrow(InvalidStateError);
+  });
+
+  it("throws InventoryUnavailableError when failure reason contains 'inventory'", async () => {
+    setupSelectMock({
+      fulfillRows: [
+        makeFulfillment({
+          status: "failed",
+          failureReason: "inventory shortage",
+        }),
+      ],
+    });
+
+    const retry = await getService();
+    await expect(retry("ORD-1001", "test")).rejects.toThrow(
+      InventoryUnavailableError,
+    );
+  });
+
+  it("throws InventoryUnavailableError when failure reason contains 'out of stock'", async () => {
+    setupSelectMock({
+      fulfillRows: [
+        makeFulfillment({
+          status: "failed",
+          failureReason: "out of stock for SKU-X",
+        }),
+      ],
+    });
+
+    const retry = await getService();
+    await expect(retry("ORD-1001", "test")).rejects.toThrow(
+      InventoryUnavailableError,
+    );
+  });
+
+  it("succeeds for a stuck order with captured payment and failed fulfillment", async () => {
+    setupSelectMock();
+    setupWriteMocks();
+
+    const retry = await getService();
+    const result = await retry("ORD-1001", "manual ops retry");
+
+    expect(result.success).toBe(true);
+    expect(result.orderId).toBe("ORD-1001"); // human-readable
+    expect(result.newStatus).toBe("processing");
+    expect(mockWriteAudit).toHaveBeenCalledOnce();
+    expect(mockWriteAudit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: "retry_fulfillment",
+        reason: "manual ops retry",
+      }),
+    );
+  });
+
+  it("succeeds for a processing order with no existing fulfillment (inserts new row)", async () => {
+    setupSelectMock({
+      orderRows: [makeOrder({ status: "processing" })],
+      fulfillRows: [], // no fulfillment record
+    });
+    setupWriteMocks();
+
+    const retry = await getService();
+    const result = await retry("ORD-1001", "create new fulfillment");
+
+    expect(result.success).toBe(true);
+    // db.insert should have been called (for new fulfillment row + event row)
+    expect(mockDbInsert).toHaveBeenCalled();
+  });
+
+  it("returns human-readable orderId (not UUID) in result", async () => {
+    setupSelectMock();
+    setupWriteMocks();
+
+    const retry = await getService();
+    const result = await retry("ORD-1001", "reason");
+
+    expect(result.orderId).toBe("ORD-1001");
+    expect(result.orderId).not.toContain("uuid");
+  });
+});
+
+describe("updateOrderStatus", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  async function getService() {
+    const mod = await import("../../src/services/recovery.service.js");
+    return mod.updateOrderStatus;
+  }
+
+  function setupOrderSelect(orderRows: ReturnType<typeof makeOrder>[]) {
+    const ordersChain = {
+      from: vi.fn().mockReturnThis(),
+      where: vi.fn().mockResolvedValue(orderRows),
+    };
+    mockDbSelect.mockReturnValueOnce(ordersChain);
+  }
+
+  it("throws OrderNotFoundError when order does not exist", async () => {
+    setupOrderSelect([]);
+    const update = await getService();
+    await expect(update("ORD-NONE", "fulfilled", "reason")).rejects.toThrow(
+      OrderNotFoundError,
+    );
+  });
+
+  it("throws InvalidStateError for an invalid status value", async () => {
+    setupOrderSelect([makeOrder({ status: "processing" })]);
+    const update = await getService();
+    await expect(update("ORD-1001", "banana", "reason")).rejects.toThrow(
+      InvalidStateError,
+    );
+  });
+
+  it("throws InvalidStateError when new status equals current status", async () => {
+    setupOrderSelect([makeOrder({ status: "stuck" })]);
+    const update = await getService();
+    await expect(update("ORD-1001", "stuck", "reason")).rejects.toThrow(
+      InvalidStateError,
+    );
+  });
+
+  it("returns dry-run preview without writing to DB", async () => {
+    setupOrderSelect([makeOrder({ status: "stuck" })]);
+    const update = await getService();
+    const result = await update(
+      "ORD-1001",
+      "processing",
+      "un-stick order",
+      true /* dryRun */,
+    );
+
+    expect(result.dryRun).toBe(true);
+    if (result.dryRun) {
+      expect(result.orderId).toBe("ORD-1001");
+      expect(result.currentStatus).toBe("stuck");
+      expect(result.proposedStatus).toBe("processing");
+      expect(result.riskLevel).toBe("low");
+    }
+    // No DB writes in dry-run
+    expect(mockDbUpdate).not.toHaveBeenCalled();
+    expect(mockWriteAudit).not.toHaveBeenCalled();
+  });
+
+  it("assesses high risk when transitioning to cancelled", async () => {
+    setupOrderSelect([makeOrder({ status: "processing" })]);
+    const update = await getService();
+    const result = await update(
+      "ORD-1001",
+      "cancelled",
+      "customer request",
+      true,
+    );
+
+    expect(result.dryRun).toBe(true);
+    if (result.dryRun) {
+      expect(result.riskLevel).toBe("high");
+    }
+  });
+
+  it("assesses high risk when current status is fulfilled", async () => {
+    setupOrderSelect([makeOrder({ status: "fulfilled" })]);
+    const update = await getService();
+    const result = await update("ORD-1001", "cancelled", "reverse", true);
+
+    expect(result.dryRun).toBe(true);
+    if (result.dryRun) {
+      expect(result.riskLevel).toBe("high");
+    }
+  });
+
+  it("assesses medium risk when marking fulfilled from non-processing", async () => {
+    setupOrderSelect([makeOrder({ status: "stuck" })]);
+    const update = await getService();
+    const result = await update(
+      "ORD-1001",
+      "fulfilled",
+      "manual confirm",
+      true,
+    );
+
+    expect(result.dryRun).toBe(true);
+    if (result.dryRun) {
+      expect(result.riskLevel).toBe("medium");
+    }
+  });
+
+  it("executes status update and writes audit when dryRun=false", async () => {
+    setupOrderSelect([makeOrder({ status: "stuck" })]);
+    setupWriteMocks();
+
+    const update = await getService();
+    const result = await update(
+      "ORD-1001",
+      "processing",
+      "un-stick order",
+      false,
+    );
+
+    expect(result.dryRun).toBe(false);
+    if (!result.dryRun) {
+      expect(result.success).toBe(true);
+      expect(result.orderId).toBe("ORD-1001");
+      expect(result.previousStatus).toBe("stuck");
+      expect(result.newStatus).toBe("processing");
+    }
+    expect(mockDbUpdate).toHaveBeenCalled();
+    expect(mockWriteAudit).toHaveBeenCalledWith(
+      expect.objectContaining({ action: "update_order_status" }),
+    );
+  });
+
+  it("defaults to dry-run=true when dryRun parameter is omitted", async () => {
+    setupOrderSelect([makeOrder({ status: "stuck" })]);
+    const update = await getService();
+    const result = await update("ORD-1001", "processing", "reason"); // no dryRun arg
+
+    expect(result.dryRun).toBe(true);
+    expect(mockDbUpdate).not.toHaveBeenCalled();
+  });
+
+  it("returns human-readable orderId in all response shapes", async () => {
+    // dry-run shape
+    setupOrderSelect([makeOrder({ status: "stuck" })]);
+    const update = await getService();
+    const dryResult = await update("ORD-1001", "processing", "r", true);
+    expect(dryResult.orderId).toBe("ORD-1001");
+
+    // live shape
+    vi.clearAllMocks();
+    setupOrderSelect([makeOrder({ status: "stuck" })]);
+    setupWriteMocks();
+    const liveResult = await update("ORD-1001", "processing", "r", false);
+    expect(liveResult.orderId).toBe("ORD-1001");
+  });
+});
