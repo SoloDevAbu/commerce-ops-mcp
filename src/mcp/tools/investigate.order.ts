@@ -1,20 +1,20 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { investigateOrder } from "../services/investigation.service.js";
-import { formatInvestigationReport } from "../lib/format.js";
-import { formatMcpError } from "../lib/errors.js";
+import { investigateOrder } from "../../services/investigation.service.js";
+import { formatInvestigationReport } from "../../lib/format.js";
+import { formatMcpError } from "../../lib/errors.js";
 
-export function registerInvestigateTools(server: McpServer): void {
+export function registerInvestigateOrderTool(server: McpServer): void {
   server.registerTool(
     "commerce_investigate_order",
     {
       title: "Investigate Order",
       description: `Performs a complete investigation of a commerce order and returns a structured report.
 
-This is the PRIMARY tool for diagnosing order issues. It correlates data from all internal systems — order records, payment status, fulfillment pipeline, event timeline, and audit history — and returns an investigation report with:
+This is the PRIMARY tool for diagnosing order issues. It correlates data from all internal systems - order records, payment status, fulfillment pipeline, event timeline, and audit history - and returns an investigation report with:
   - A plain-English summary of the current situation
   - Identified root cause
-  - Evidence checklist (✓/✗ for each pipeline stage)
+  - Evidence checklist (for each pipeline stage)
   - Full event timeline
   - Confidence level (high/medium/low)
   - Recommended next step
@@ -34,7 +34,7 @@ Args:
 
 Returns: Structured investigation report with summary, root cause, evidence, timeline, confidence, and recommended next step.
 
-Do NOT use this tool to make changes — use commerce_retry_fulfillment_processing or commerce_update_order_status for state changes.`,
+Do NOT use this tool to make changes - use commerce_retry_fulfillment_processing or commerce_update_order_status for state changes.`,
 
       inputSchema: {
         orderId: z

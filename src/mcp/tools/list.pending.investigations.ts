@@ -1,9 +1,9 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { listPendingInvestigations } from "../services/operations.service.js";
-import { formatPendingInvestigations } from "../lib/format.js";
-import { formatMcpError } from "../lib/errors.js";
-import { DEFAULT_PAGE_LIMIT } from "../constants.js";
+import { listPendingInvestigations } from "../../services/operations.service.js";
+import { formatPendingInvestigations } from "../../lib/format.js";
+import { formatMcpError } from "../../lib/errors.js";
+import { DEFAULT_PAGE_LIMIT } from "../../constants.js";
 
 const ISSUE_CATEGORIES = [
   "payment_mismatch",
@@ -12,7 +12,7 @@ const ISSUE_CATEGORIES = [
   "fulfillment_delay",
 ] as const;
 
-export function registerPendingTools(server: McpServer): void {
+export function registerListPendingInvestigationsTool(server: McpServer): void {
   server.registerTool(
     "commerce_list_pending_investigations",
     {

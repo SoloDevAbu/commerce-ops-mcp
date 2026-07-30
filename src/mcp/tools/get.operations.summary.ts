@@ -1,11 +1,11 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { getOperationsSummary } from "../services/operations.service.js";
-import { formatOperationsSummary } from "../lib/format.js";
-import { formatMcpError } from "../lib/errors.js";
-import { DEFAULT_PERIOD_HOURS } from "../constants.js";
+import { getOperationsSummary } from "../../services/operations.service.js";
+import { formatOperationsSummary } from "../../lib/format.js";
+import { formatMcpError } from "../../lib/errors.js";
+import { DEFAULT_PERIOD_HOURS } from "../../constants.js";
 
-export function registerSummaryTools(server: McpServer): void {
+export function registerGetOperationsSummaryTool(server: McpServer): void {
   server.registerTool(
     "commerce_get_operations_summary",
     {

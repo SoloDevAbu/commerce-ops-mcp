@@ -24,31 +24,13 @@
  */
 
 import "dotenv/config";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import Fastify from "fastify";
 import cors from "@fastify/cors";
 
 import { MCP_SERVER_NAME, MCP_SERVER_VERSION } from "./constants.js";
-import { registerInvestigateTools } from "./tools/investigate.tool.js";
-import { registerPendingTools } from "./tools/pending.tool.js";
-import { registerRecoveryTools } from "./tools/recovery.tool.js";
-import { registerSummaryTools } from "./tools/summary.tool.js";
-
-function createMcpServer(): McpServer {
-  const server = new McpServer({
-    name: MCP_SERVER_NAME,
-    version: MCP_SERVER_VERSION,
-  });
-
-  registerInvestigateTools(server);
-  registerPendingTools(server);
-  registerRecoveryTools(server);
-  registerSummaryTools(server);
-
-  return server;
-}
+import { createMcpServer } from "./mcp/index.js";
 
 async function runStdio(): Promise<void> {
   const server = createMcpServer();
