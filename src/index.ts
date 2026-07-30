@@ -36,10 +36,6 @@ import { registerPendingTools } from "./tools/pending.tool";
 import { registerRecoveryTools } from "./tools/recovery.tool";
 import { registerSummaryTools } from "./tools/summary.tool";
 
-// ──────────────────────────────────────────────────────────────────────────────
-// Create and configure the MCP server
-// ──────────────────────────────────────────────────────────────────────────────
-
 function createMcpServer(): McpServer {
   const server = new McpServer({
     name: MCP_SERVER_NAME,
@@ -54,10 +50,6 @@ function createMcpServer(): McpServer {
   return server;
 }
 
-// ──────────────────────────────────────────────────────────────────────────────
-// stdio transport — for local Claude Desktop use
-// ──────────────────────────────────────────────────────────────────────────────
-
 async function runStdio(): Promise<void> {
   const server = createMcpServer();
   const transport = new StdioServerTransport();
@@ -65,10 +57,6 @@ async function runStdio(): Promise<void> {
   // Log to stderr only — stdout is reserved for MCP protocol messages
   process.stderr.write(`[${MCP_SERVER_NAME}] Running via stdio transport\n`);
 }
-
-// ──────────────────────────────────────────────────────────────────────────────
-// Streamable HTTP transport — for hosted/remote deployments
-// ──────────────────────────────────────────────────────────────────────────────
 
 async function runHttp(): Promise<void> {
   const port = parseInt(process.env.PORT ?? "3000", 10);
@@ -93,8 +81,9 @@ async function runHttp(): Promise<void> {
     timestamp: new Date().toISOString(),
   }));
 
-  // MCP endpoint — creates a fresh stateless transport per request
-  app.post("/mcp", async (request, reply) => {
+  // MCP endpoint — creates a fresh stateless transport per request.
+  // app.all handles both POST (tool calls) and GET (capability discovery by MCP Inspector).
+  app.all("/mcp", async (request, reply) => {
     const server = createMcpServer();
 
     const transport = new StreamableHTTPServerTransport({
@@ -104,6 +93,7 @@ async function runHttp(): Promise<void> {
 
     reply.raw.on("close", () => {
       transport.close().catch(() => void 0);
+      server.close().catch(() => void 0);
     });
 
     await server.connect(transport);
@@ -114,13 +104,9 @@ async function runHttp(): Promise<void> {
 
   await app.listen({ port, host });
   app.log.info(
-    `[${MCP_SERVER_NAME}] HTTP transport listening on http://${host}:${port}/mcp`
+    `[${MCP_SERVER_NAME}] HTTP transport listening on http://${host}:${port}/mcp`,
   );
 }
-
-// ──────────────────────────────────────────────────────────────────────────────
-// Transport selector
-// ──────────────────────────────────────────────────────────────────────────────
 
 const transport = (process.env.TRANSPORT ?? "stdio").toLowerCase();
 
