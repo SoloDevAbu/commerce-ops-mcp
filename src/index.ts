@@ -30,11 +30,11 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import Fastify from "fastify";
 import cors from "@fastify/cors";
 
-import { MCP_SERVER_NAME, MCP_SERVER_VERSION } from "./constants";
-import { registerInvestigateTools } from "./tools/investigate.tool";
-import { registerPendingTools } from "./tools/pending.tool";
-import { registerRecoveryTools } from "./tools/recovery.tool";
-import { registerSummaryTools } from "./tools/summary.tool";
+import { MCP_SERVER_NAME, MCP_SERVER_VERSION } from "./constants.js";
+import { registerInvestigateTools } from "./tools/investigate.tool.js";
+import { registerPendingTools } from "./tools/pending.tool.js";
+import { registerRecoveryTools } from "./tools/recovery.tool.js";
+import { registerSummaryTools } from "./tools/summary.tool.js";
 
 function createMcpServer(): McpServer {
   const server = new McpServer({

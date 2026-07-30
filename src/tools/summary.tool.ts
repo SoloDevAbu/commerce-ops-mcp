@@ -1,9 +1,9 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { getOperationsSummary } from "../services/operations.service";
-import { formatOperationsSummary } from "../lib/format";
-import { formatMcpError } from "../lib/errors";
-import { DEFAULT_PERIOD_HOURS } from "../constants";
+import { getOperationsSummary } from "../services/operations.service.js";
+import { formatOperationsSummary } from "../lib/format.js";
+import { formatMcpError } from "../lib/errors.js";
+import { DEFAULT_PERIOD_HOURS } from "../constants.js";
 
 export function registerSummaryTools(server: McpServer): void {
   server.registerTool(
@@ -37,7 +37,7 @@ Returns: Operational metrics with attention breakdown and recent audit trail.`,
           .max(168)
           .default(DEFAULT_PERIOD_HOURS)
           .describe(
-            "How many hours back to look for orders and audit events (default: 24, max: 168 = 7 days)"
+            "How many hours back to look for orders and audit events (default: 24, max: 168 = 7 days)",
           ),
       },
 
@@ -87,6 +87,6 @@ Returns: Operational metrics with attention breakdown and recent audit trail.`,
           content: [{ type: "text", text: formatMcpError(error) }],
         };
       }
-    }
+    },
   );
 }

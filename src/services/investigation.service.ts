@@ -10,18 +10,18 @@
  */
 
 import { eq, asc } from "drizzle-orm";
-import { db } from "../db";
-import { orders, payments, fulfillment, orderEvents } from "../db/schema";
+import { db } from "../db/client.js";
+import { orders, payments, fulfillment, orderEvents } from "../db/schema.js";
 import {
   OrderNotFoundError,
   type InvestigationReport,
   type EvidenceItem,
   type TimelineEvent,
-} from "../types";
+} from "../types.js";
 import {
   STUCK_THRESHOLD_HOURS,
   FULFILLMENT_DELAY_THRESHOLD_HOURS,
-} from "../constants";
+} from "../constants.js";
 
 function hoursSince(isoString: string | null | undefined): number {
   if (!isoString) return 0;
@@ -129,7 +129,11 @@ export async function investigateOrder(
         status: "fail",
         detail: `Payment status: ${payment.internalStatus}`,
       },
-      { label: "Fulfillment Started", status: "fail", detail: "Correctly blocked — payment not captured" },
+      {
+        label: "Fulfillment Started",
+        status: "fail",
+        detail: "Correctly blocked — payment not captured",
+      },
     ];
 
     return {

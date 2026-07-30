@@ -17,8 +17,14 @@
  */
 
 import "dotenv/config";
-import { db } from "./client";
-import { orders, payments, fulfillment, orderEvents, auditLog } from "./schema";
+import { db } from "./client.js";
+import {
+  orders,
+  payments,
+  fulfillment,
+  orderEvents,
+  auditLog,
+} from "./schema.js";
 
 const now = new Date();
 

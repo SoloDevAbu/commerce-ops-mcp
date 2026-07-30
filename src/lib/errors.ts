@@ -2,7 +2,7 @@ import {
   OrderNotFoundError,
   InvalidStateError,
   InventoryUnavailableError,
-} from "../types";
+} from "../types.js";
 
 export { OrderNotFoundError, InvalidStateError, InventoryUnavailableError };
 

@@ -1,8 +1,8 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { investigateOrder } from "../services/investigation.service";
-import { formatInvestigationReport } from "../lib/format";
-import { formatMcpError } from "../lib/errors";
+import { investigateOrder } from "../services/investigation.service.js";
+import { formatInvestigationReport } from "../lib/format.js";
+import { formatMcpError } from "../lib/errors.js";
 
 export function registerInvestigateTools(server: McpServer): void {
   server.registerTool(

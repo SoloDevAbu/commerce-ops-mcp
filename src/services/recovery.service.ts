@@ -12,13 +12,8 @@
 
 import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
-import { db } from "../db";
-import {
-  orders,
-  payments,
-  fulfillment,
-  orderEvents,
-} from "../db/schema";
+import { db } from "../db/index.js";
+import { orders, payments, fulfillment, orderEvents } from "../db/schema.js";
 import { writeAudit } from "../lib/audit.js";
 import {
   OrderNotFoundError,
@@ -26,7 +21,7 @@ import {
   InventoryUnavailableError,
   type RetryResult,
   type StatusUpdateResult,
-} from "../types";
+} from "../types.js";
 
 /**
  * Valid source statuses that permit a fulfillment retry.

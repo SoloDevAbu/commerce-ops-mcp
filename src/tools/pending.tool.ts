@@ -1,9 +1,9 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { listPendingInvestigations } from "../services/operations.service";
-import { formatPendingInvestigations } from "../lib/format";
-import { formatMcpError } from "../lib/errors";
-import { DEFAULT_PAGE_LIMIT } from "../constants";
+import { listPendingInvestigations } from "../services/operations.service.js";
+import { formatPendingInvestigations } from "../lib/format.js";
+import { formatMcpError } from "../lib/errors.js";
+import { DEFAULT_PAGE_LIMIT } from "../constants.js";
 
 const ISSUE_CATEGORIES = [
   "payment_mismatch",
@@ -50,7 +50,7 @@ Returns: Grouped list of pending investigations with order IDs, customer emails,
           .enum(ISSUE_CATEGORIES)
           .optional()
           .describe(
-            "Filter to a specific issue category. Omit to return all pending investigations."
+            "Filter to a specific issue category. Omit to return all pending investigations.",
           ),
       },
 
@@ -62,7 +62,12 @@ Returns: Grouped list of pending investigations with order IDs, customer emails,
             customerEmail: z.string(),
             amount: z.number(),
             currency: z.string(),
-            issueCategory: z.enum(["payment_mismatch", "fulfillment_failure", "stuck_processing", "fulfillment_delay"]),
+            issueCategory: z.enum([
+              "payment_mismatch",
+              "fulfillment_failure",
+              "stuck_processing",
+              "fulfillment_delay",
+            ]),
             issueSummary: z.string(),
             stuckSince: z.string().nullable().optional(),
           }),
@@ -94,6 +99,6 @@ Returns: Grouped list of pending investigations with order IDs, customer emails,
           content: [{ type: "text", text: formatMcpError(error) }],
         };
       }
-    }
+    },
   );
 }

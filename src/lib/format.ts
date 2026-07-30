@@ -5,7 +5,7 @@ import type {
   PendingInvestigation,
   OperationsSummary,
   AuditEntry,
-} from "../types";
+} from "../types.js";
 
 function evidenceIcon(status: EvidenceItem["status"]): string {
   switch (status) {

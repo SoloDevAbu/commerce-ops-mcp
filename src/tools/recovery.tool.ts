@@ -3,8 +3,8 @@ import { z } from "zod";
 import {
   retryFulfillmentProcessing,
   updateOrderStatus,
-} from "../services/recovery.service";
-import { formatMcpError } from "../lib/errors";
+} from "../services/recovery.service.js";
+import { formatMcpError } from "../lib/errors.js";
 
 const VALID_ORDER_STATUSES = [
   "pending",

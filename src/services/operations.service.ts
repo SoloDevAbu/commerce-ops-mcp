@@ -7,20 +7,20 @@
  */
 
 import { ne, and, gt, desc } from "drizzle-orm";
-import { db } from "../db";
-import { orders, payments, fulfillment, auditLog } from "../db/schema";
+import { db } from "../db/index.js";
+import { orders, payments, fulfillment, auditLog } from "../db/schema.js";
 import type {
   PendingInvestigation,
   IssueCategory,
   OperationsSummary,
   AuditEntry,
-} from "../types";
+} from "../types.js";
 import {
   STUCK_THRESHOLD_HOURS,
   FULFILLMENT_DELAY_THRESHOLD_HOURS,
   DEFAULT_PERIOD_HOURS,
   DEFAULT_PAGE_LIMIT,
-} from "../constants";
+} from "../constants.js";
 
 function hoursSince(isoString: string | null | undefined): number {
   if (!isoString) return 0;
