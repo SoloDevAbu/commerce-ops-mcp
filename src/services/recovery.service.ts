@@ -101,48 +101,51 @@ export async function retryFulfillmentProcessing(
     throw new InventoryUnavailableError(orderId);
   }
 
-  // Execute recovery — all writes use internalId (UUID)
-  if (ful) {
-    await db
-      .update(fulfillment)
-      .set({
+  // Execute recovery — all writes are wrapped in a single transaction so that
+  // a mid-flight crash leaves the database in a consistent state.
+  await db.transaction(async (tx) => {
+    if (ful) {
+      await tx
+        .update(fulfillment)
+        .set({
+          status: "processing",
+          failureReason: null,
+          startedAt: now,
+          updatedAt: now,
+        })
+        .where(eq(fulfillment.orderId, internalId));
+    } else {
+      await tx.insert(fulfillment).values({
+        id: randomUUID(),
+        orderId: internalId,
         status: "processing",
-        failureReason: null,
         startedAt: now,
         updatedAt: now,
-      })
-      .where(eq(fulfillment.orderId, internalId));
-  } else {
-    await db.insert(fulfillment).values({
+      });
+    }
+
+    await tx
+      .update(orders)
+      .set({ status: "processing", updatedAt: now, stuckSince: null })
+      .where(eq(orders.id, internalId));
+
+    await tx.insert(orderEvents).values({
       id: randomUUID(),
       orderId: internalId,
-      status: "processing",
-      startedAt: now,
-      updatedAt: now,
+      eventType: "fulfillment_retried",
+      description: `Fulfillment retried by operations. Reason: ${reason}`,
+      createdAt: now,
     });
-  }
 
-  // Update order status to processing
-  await db
-    .update(orders)
-    .set({ status: "processing", updatedAt: now, stuckSince: null })
-    .where(eq(orders.id, internalId));
-
-  // Append event to timeline
-  await db.insert(orderEvents).values({
-    id: randomUUID(),
-    orderId: internalId,
-    eventType: "fulfillment_retried",
-    description: `Fulfillment retried by operations. Reason: ${reason}`,
-    createdAt: now,
-  });
-
-  // Write audit record — pass UUID as FK
-  await writeAudit({
-    orderId: internalId,
-    action: "retry_fulfillment",
-    reason,
-    outcome: "Fulfillment restarted — status set to processing",
+    await writeAudit(
+      {
+        orderId: internalId,
+        action: "retry_fulfillment",
+        reason,
+        outcome: "Fulfillment restarted — status set to processing",
+      },
+      tx,
+    );
   });
 
   return {
@@ -238,34 +241,38 @@ export async function updateOrderStatus(
     };
   }
 
-  // Execute update — all writes use internalId (UUID)
+  // Execute update — all writes are wrapped in a single transaction.
   const internalId = order.id;
   const now = new Date().toISOString();
   const previousStatus = order.status;
 
-  await db
-    .update(orders)
-    .set({
-      status: newStatus,
-      updatedAt: now,
-      stuckSince: newStatus === "stuck" ? now : null,
-    })
-    .where(eq(orders.id, internalId));
+  await db.transaction(async (tx) => {
+    await tx
+      .update(orders)
+      .set({
+        status: newStatus,
+        updatedAt: now,
+        stuckSince: newStatus === "stuck" ? now : null,
+      })
+      .where(eq(orders.id, internalId));
 
-  await db.insert(orderEvents).values({
-    id: randomUUID(),
-    orderId: internalId,
-    eventType: "status_updated",
-    description: `Status manually updated: "${previousStatus}" → "${newStatus}". Reason: ${reason}`,
-    createdAt: now,
-  });
+    await tx.insert(orderEvents).values({
+      id: randomUUID(),
+      orderId: internalId,
+      eventType: "status_updated",
+      description: `Status manually updated: "${previousStatus}" → "${newStatus}". Reason: ${reason}`,
+      createdAt: now,
+    });
 
-  // Write audit record — pass UUID as FK
-  await writeAudit({
-    orderId: internalId,
-    action: "update_order_status",
-    reason,
-    outcome: `Status changed from "${previousStatus}" to "${newStatus}"`,
+    await writeAudit(
+      {
+        orderId: internalId,
+        action: "update_order_status",
+        reason,
+        outcome: `Status changed from "${previousStatus}" to "${newStatus}"`,
+      },
+      tx,
+    );
   });
 
   return {

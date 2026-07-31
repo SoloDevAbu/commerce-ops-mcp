@@ -3,7 +3,7 @@
  *
  * The core intelligence layer of the MCP server. Given a human-readable
  * orderId (e.g. "ORD-1047"), this service:
- *  1. Resolves orderId → internal UUID via orders.order_id
+ *  1. Resolves orderId -> internal UUID via orders.order_id
  *  2. Correlates data across all five tables (orders, payments, fulfillment,
  *     order_events, audit_log) using the UUID for FK lookups
  *  3. Returns a structured InvestigationReport — not raw data.
@@ -24,60 +24,54 @@ import {
   STUCK_THRESHOLD_HOURS,
   FULFILLMENT_DELAY_THRESHOLD_HOURS,
 } from "../constants.js";
+import { hoursSince } from "../lib/date.utils.js";
 
-function hoursSince(isoString: string | null | undefined): number {
-  if (!isoString) return 0;
-  return (Date.now() - new Date(isoString).getTime()) / (1000 * 60 * 60);
-}
+// ---------------------------------------------------------------------------
+// Context — the fully-correlated data for a single order investigation
+// ---------------------------------------------------------------------------
+
+type Payment = {
+  internalStatus: string;
+  providerStatus: string;
+  capturedAt: string | null;
+};
+
+type Fulfillment = {
+  status: string;
+  failureReason: string | null;
+  startedAt: string | null;
+  updatedAt: string;
+};
+
+type Order = {
+  id: string;
+  orderId: string;
+  status: string;
+  createdAt: string;
+  updatedAt: string;
+  stuckSince: string | null;
+};
+
+export type InvestigationContext = {
+  order: Order;
+  payment: Payment | null;
+  ful: Fulfillment | null;
+  timeline: TimelineEvent[];
+};
 
 function hasDuplicateEvents(
   events: TimelineEvent[],
   eventType: string,
 ): boolean {
-  const count = events.filter((e) => e.eventType === eventType).length;
-  return count > 1;
+  return events.filter((e) => e.eventType === eventType).length > 1;
 }
 
-export async function investigateOrder(
-  orderId: string,
-): Promise<InvestigationReport> {
-  // Step 1: Resolve human-readable orderId → internal UUID
-  const orderRows = await db
-    .select()
-    .from(orders)
-    .where(eq(orders.orderId, orderId));
+/** 1. Payment status mismatch between internal record and payment provider */
+function checkPaymentMismatch(
+  ctx: InvestigationContext,
+): InvestigationReport | null {
+  const { order, payment, ful, timeline } = ctx;
 
-  const order = orderRows[0];
-  if (!order) {
-    throw new OrderNotFoundError(orderId);
-  }
-
-  // Step 2: Use the internal UUID for all FK-based lookups (in parallel)
-  const internalId = order.id;
-  const [paymentRows, fulfillmentRows, eventRows] = await Promise.all([
-    db.select().from(payments).where(eq(payments.orderId, internalId)),
-    db.select().from(fulfillment).where(eq(fulfillment.orderId, internalId)),
-    db
-      .select()
-      .from(orderEvents)
-      .where(eq(orderEvents.orderId, internalId))
-      .orderBy(asc(orderEvents.createdAt)),
-  ]);
-
-  const payment = paymentRows[0];
-  const ful = fulfillmentRows[0];
-
-  // Build timeline from event rows
-  const timeline: TimelineEvent[] = eventRows.map((e) => ({
-    timestamp: e.createdAt,
-    eventType: e.eventType,
-    description: e.description,
-  }));
-
-  // Decision tree
-  // All report objects use the human-readable orderId (order.orderId), not the UUID.
-
-  // 1. Payment status mismatch (highest priority — financial risk)
   if (
     payment &&
     payment.internalStatus !== payment.providerStatus &&
@@ -124,7 +118,15 @@ export async function investigateOrder(
     };
   }
 
-  // 1b. Payment failed — order correctly held, system behaving as expected
+  return null;
+}
+
+/** 1b. Payment explicitly failed — order correctly held in pending */
+function checkPaymentFailed(
+  ctx: InvestigationContext,
+): InvestigationReport | null {
+  const { order, payment, timeline } = ctx;
+
   if (
     payment &&
     payment.internalStatus === "failed" &&
@@ -162,7 +164,15 @@ export async function investigateOrder(
     };
   }
 
-  // 2. Payment not yet captured (pending)
+  return null;
+}
+
+/** 2. Payment not yet captured (still pending) */
+function checkPaymentPending(
+  ctx: InvestigationContext,
+): InvestigationReport | null {
+  const { order, payment, timeline } = ctx;
+
   if (payment && payment.internalStatus === "pending") {
     const evidence: EvidenceItem[] = [
       {
@@ -195,7 +205,15 @@ export async function investigateOrder(
     };
   }
 
-  // 3. Fulfillment failed
+  return null;
+}
+
+/** 3. Fulfillment pipeline failed */
+function checkFulfillmentFailed(
+  ctx: InvestigationContext,
+): InvestigationReport | null {
+  const { order, ful, timeline } = ctx;
+
   if (ful && ful.status === "failed") {
     const isInventoryIssue =
       ful.failureReason?.toLowerCase().includes("inventory") ||
@@ -240,7 +258,15 @@ export async function investigateOrder(
     };
   }
 
-  // 4. Fulfillment never started (payment captured but no fulfillment)
+  return null;
+}
+
+/** 4. Fulfillment never started despite payment being captured */
+function checkFulfillmentNeverStarted(
+  ctx: InvestigationContext,
+): InvestigationReport | null {
+  const { order, payment, ful, timeline } = ctx;
+
   if (
     payment &&
     payment.internalStatus === "captured" &&
@@ -281,68 +307,82 @@ export async function investigateOrder(
     };
   }
 
-  // 5. Stuck in processing (order flagged as stuck OR processing > threshold)
+  return null;
+}
+
+/** 5. Order stuck in processing beyond threshold */
+function checkStuckProcessing(
+  ctx: InvestigationContext,
+): InvestigationReport | null {
+  const { order, ful, timeline } = ctx;
+
   const isStuck =
     order.status === "stuck" ||
     (order.status === "processing" &&
       hoursSince(order.createdAt) > STUCK_THRESHOLD_HOURS);
 
-  if (isStuck) {
-    const stuckHours = order.stuckSince
-      ? hoursSince(order.stuckSince)
-      : hoursSince(order.updatedAt);
+  if (!isStuck) return null;
 
-    const hasDuplicateFulfillment = hasDuplicateEvents(
-      timeline,
-      "fulfillment_started",
-    );
+  const stuckHours = order.stuckSince
+    ? hoursSince(order.stuckSince)
+    : hoursSince(order.updatedAt);
 
-    const evidence: EvidenceItem[] = [
-      { label: "Payment Captured", status: "pass" },
-      {
-        label: "Fulfillment Started",
-        status: ful?.startedAt ? "pass" : "fail",
-      },
-      {
-        label: "Order Stuck",
-        status: "fail",
-        detail: `No progress for ${stuckHours.toFixed(1)} hours`,
-      },
-      ...(hasDuplicateFulfillment
-        ? [
-            {
-              label: "Duplicate Fulfillment Event",
-              status: "fail" as const,
-              detail: "Processing deadlock detected",
-            } satisfies EvidenceItem,
-          ]
-        : []),
-    ];
+  const hasDuplicateFulfillment = hasDuplicateEvents(
+    timeline,
+    "fulfillment_started",
+  );
 
-    return {
-      orderId: order.orderId,
-      summary:
-        `Order has been stuck in processing for ${stuckHours.toFixed(1)} hours with no progress. ` +
-        (hasDuplicateFulfillment
-          ? "A duplicate fulfillment event was detected, which may have caused a processing deadlock."
-          : ""),
-      rootCause: hasDuplicateFulfillment
-        ? "Duplicate fulfillment events triggered a processing deadlock. " +
-          "The system received the same fulfillment signal twice and entered an inconsistent state."
-        : "The order entered a processing state but no downstream system acknowledged it. " +
-          "This may indicate a queue timeout, worker crash, or network partition.",
-      evidence,
-      timeline,
-      confidence: "medium",
-      recommendedNextStep:
-        "Use update_order_status with dry_run=true to preview impact, then manually advance " +
-        "the order to 'processing' or 'cancelled' after reviewing the timeline.",
-      riskLevel: "medium",
-      automationEligible: false,
-    };
-  }
+  const evidence: EvidenceItem[] = [
+    { label: "Payment Captured", status: "pass" },
+    {
+      label: "Fulfillment Started",
+      status: ful?.startedAt ? "pass" : "fail",
+    },
+    {
+      label: "Order Stuck",
+      status: "fail",
+      detail: `No progress for ${stuckHours.toFixed(1)} hours`,
+    },
+    ...(hasDuplicateFulfillment
+      ? [
+          {
+            label: "Duplicate Fulfillment Event",
+            status: "fail" as const,
+            detail: "Processing deadlock detected",
+          } satisfies EvidenceItem,
+        ]
+      : []),
+  ];
 
-  // 6. Fulfillment delayed (in processing but no update for > threshold)
+  return {
+    orderId: order.orderId,
+    summary:
+      `Order has been stuck in processing for ${stuckHours.toFixed(1)} hours with no progress. ` +
+      (hasDuplicateFulfillment
+        ? "A duplicate fulfillment event was detected, which may have caused a processing deadlock."
+        : ""),
+    rootCause: hasDuplicateFulfillment
+      ? "Duplicate fulfillment events triggered a processing deadlock. " +
+        "The system received the same fulfillment signal twice and entered an inconsistent state."
+      : "The order entered a processing state but no downstream system acknowledged it. " +
+        "This may indicate a queue timeout, worker crash, or network partition.",
+    evidence,
+    timeline,
+    confidence: "medium",
+    recommendedNextStep:
+      "Use update_order_status with dry_run=true to preview impact, then manually advance " +
+      "the order to 'processing' or 'cancelled' after reviewing the timeline.",
+    riskLevel: "medium",
+    automationEligible: false,
+  };
+}
+
+/** 6. Fulfillment in progress but no update received beyond delay threshold */
+function checkFulfillmentDelayed(
+  ctx: InvestigationContext,
+): InvestigationReport | null {
+  const { order, ful, timeline } = ctx;
+
   if (ful && ful.status === "processing") {
     const delayHours = hoursSince(ful.updatedAt);
 
@@ -379,7 +419,13 @@ export async function investigateOrder(
     }
   }
 
-  // 7. Healthy — no issues detected
+  return null;
+}
+
+/** 7. Fallback — order is healthy, no action needed */
+function checkHealthy(ctx: InvestigationContext): InvestigationReport {
+  const { order, payment, ful, timeline } = ctx;
+
   const evidence: EvidenceItem[] = [
     {
       label: "Payment Captured",
@@ -403,4 +449,82 @@ export async function investigateOrder(
     riskLevel: "low",
     automationEligible: false,
   };
+}
+
+const ANALYZERS: Array<
+  (ctx: InvestigationContext) => InvestigationReport | null
+> = [
+  checkPaymentMismatch,
+  checkPaymentFailed,
+  checkPaymentPending,
+  checkFulfillmentFailed,
+  checkFulfillmentNeverStarted,
+  checkStuckProcessing,
+  checkFulfillmentDelayed,
+];
+
+export async function investigateOrder(
+  orderId: string,
+): Promise<InvestigationReport> {
+  const orderRows = await db
+    .select()
+    .from(orders)
+    .where(eq(orders.orderId, orderId));
+
+  const order = orderRows[0];
+  if (!order) {
+    throw new OrderNotFoundError(orderId);
+  }
+
+  const internalId = order.id;
+  const [paymentRows, fulfillmentRows, eventRows] = await Promise.all([
+    db.select().from(payments).where(eq(payments.orderId, internalId)),
+    db.select().from(fulfillment).where(eq(fulfillment.orderId, internalId)),
+    db
+      .select()
+      .from(orderEvents)
+      .where(eq(orderEvents.orderId, internalId))
+      .orderBy(asc(orderEvents.createdAt)),
+  ]);
+
+  const paymentRow = paymentRows[0];
+  const fulRow = fulfillmentRows[0];
+
+  const ctx: InvestigationContext = {
+    order: {
+      id: order.id,
+      orderId: order.orderId,
+      status: order.status,
+      createdAt: order.createdAt,
+      updatedAt: order.updatedAt,
+      stuckSince: order.stuckSince ?? null,
+    },
+    payment: paymentRow
+      ? {
+          internalStatus: paymentRow.internalStatus,
+          providerStatus: paymentRow.providerStatus,
+          capturedAt: paymentRow.capturedAt ?? null,
+        }
+      : null,
+    ful: fulRow
+      ? {
+          status: fulRow.status,
+          failureReason: fulRow.failureReason ?? null,
+          startedAt: fulRow.startedAt ?? null,
+          updatedAt: fulRow.updatedAt,
+        }
+      : null,
+    timeline: eventRows.map((e) => ({
+      timestamp: e.createdAt,
+      eventType: e.eventType,
+      description: e.description,
+    })),
+  };
+
+  for (const analyze of ANALYZERS) {
+    const report = analyze(ctx);
+    if (report !== null) return report;
+  }
+
+  return checkHealthy(ctx);
 }

@@ -27,14 +27,7 @@ import {
   DEFAULT_PAGE_LIMIT,
 } from "../constants.js";
 
-function hoursSince(isoString: string | null | undefined): number {
-  if (!isoString) return 0;
-  return (Date.now() - new Date(isoString).getTime()) / (1000 * 60 * 60);
-}
-
-function isoAfter(hours: number): string {
-  return new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
-}
+import { hoursSince, isoAfter } from "../lib/date.utils.js";
 
 export async function listPendingInvestigations(opts?: {
   limit?: number;
@@ -42,32 +35,54 @@ export async function listPendingInvestigations(opts?: {
 }): Promise<PendingInvestigation[]> {
   const limit = opts?.limit ?? DEFAULT_PAGE_LIMIT;
 
-  // Fetch all non-terminal orders
-  const openOrders = await db
-    .select()
+  // Single JOIN query — scoped to non-terminal orders only.
+  // This replaces the previous pattern of fetching entire tables into memory
+  // and building Maps to correlate them, which was an OOM risk at scale.
+  const rows = await db
+    .select({
+      // Order fields
+      id: orders.id,
+      orderId: orders.orderId,
+      status: orders.status,
+      customerEmail: orders.customerEmail,
+      amount: orders.amount,
+      currency: orders.currency,
+      createdAt: orders.createdAt,
+      updatedAt: orders.updatedAt,
+      stuckSince: orders.stuckSince,
+      // Payment fields (nullable — LEFT JOIN)
+      paymentInternalStatus: payments.internalStatus,
+      paymentProviderStatus: payments.providerStatus,
+      // Fulfillment fields (nullable — LEFT JOIN)
+      fulfillmentStatus: fulfillment.status,
+      fulfillmentFailureReason: fulfillment.failureReason,
+      fulfillmentUpdatedAt: fulfillment.updatedAt,
+    })
     .from(orders)
+    .leftJoin(payments, eq(payments.orderId, orders.id))
+    .leftJoin(fulfillment, eq(fulfillment.orderId, orders.id))
     .where(and(ne(orders.status, "fulfilled"), ne(orders.status, "cancelled")));
 
-  if (openOrders.length === 0) return [];
-
-  // Fetch related data in parallel (all payments and fulfillments)
-  const [allPayments, allFulfillments] = await Promise.all([
-    db.select().from(payments),
-    db.select().from(fulfillment),
-  ]);
-
-  // Key maps by UUID (orders.id) — the FK stored in child tables
-  const paymentByOrder = new Map(allPayments.map((p) => [p.orderId, p]));
-  const fulfillmentByOrder = new Map(
-    allFulfillments.map((f) => [f.orderId, f]),
-  );
+  if (rows.length === 0) return [];
 
   const results: PendingInvestigation[] = [];
 
-  for (const order of openOrders) {
-    // Use UUID (order.id) to correlate with child records
-    const payment = paymentByOrder.get(order.id);
-    const ful = fulfillmentByOrder.get(order.id);
+  for (const row of rows) {
+    const payment =
+      row.paymentInternalStatus !== null
+        ? {
+            internalStatus: row.paymentInternalStatus!,
+            providerStatus: row.paymentProviderStatus!,
+          }
+        : null;
+    const ful =
+      row.fulfillmentStatus !== null
+        ? {
+            status: row.fulfillmentStatus!,
+            failureReason: row.fulfillmentFailureReason,
+            updatedAt: row.fulfillmentUpdatedAt!,
+          }
+        : null;
 
     let issueCategory: IssueCategory | null = null;
     let issueSummary = "";
@@ -86,7 +101,7 @@ export async function listPendingInvestigations(opts?: {
       issueSummary = `Payment mismatch: internal="${payment.internalStatus}" provider="${payment.providerStatus}"`;
     } else if (payment && payment.internalStatus === "pending") {
       issueCategory = "payment_mismatch";
-      const hoursWaiting = hoursSince(order.createdAt);
+      const hoursWaiting = hoursSince(row.createdAt);
       issueSummary = `Payment has been pending for ${hoursWaiting.toFixed(1)} hours`;
     } else if (ful && ful.status === "failed") {
       issueCategory = "fulfillment_failure";
@@ -98,17 +113,17 @@ export async function listPendingInvestigations(opts?: {
       ful?.status === "not_started"
     ) {
       issueCategory = "fulfillment_failure";
-      const elapsedHours = hoursSince(order.createdAt);
+      const elapsedHours = hoursSince(row.createdAt);
       issueSummary = `Payment captured ${elapsedHours.toFixed(1)}h ago but fulfillment never started`;
     } else if (
-      order.status === "stuck" ||
-      (order.status === "processing" &&
-        hoursSince(order.createdAt) > STUCK_THRESHOLD_HOURS)
+      row.status === "stuck" ||
+      (row.status === "processing" &&
+        hoursSince(row.createdAt) > STUCK_THRESHOLD_HOURS)
     ) {
       issueCategory = "stuck_processing";
-      stuckSinceHours = order.stuckSince
-        ? hoursSince(order.stuckSince)
-        : hoursSince(order.updatedAt);
+      stuckSinceHours = row.stuckSince
+        ? hoursSince(row.stuckSince)
+        : hoursSince(row.updatedAt);
       issueSummary = `Order stuck in processing for ${stuckSinceHours.toFixed(1)} hours`;
     } else if (
       ful?.status === "processing" &&
@@ -124,15 +139,14 @@ export async function listPendingInvestigations(opts?: {
     if (opts?.issueCategory && opts.issueCategory !== issueCategory) continue;
 
     results.push({
-      // Return human-readable orderId for display — not the internal UUID
-      orderId: order.orderId,
+      orderId: row.orderId,
       issueCategory,
       issueSummary,
-      amount: order.amount,
-      currency: order.currency,
-      customerEmail: order.customerEmail,
+      amount: row.amount,
+      currency: row.currency,
+      customerEmail: row.customerEmail,
       stuckSinceHours,
-      createdAt: order.createdAt,
+      createdAt: row.createdAt,
     });
   }
 
