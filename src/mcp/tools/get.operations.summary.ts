@@ -42,17 +42,19 @@ Returns: Operational metrics with attention breakdown and recent audit trail.`,
       },
 
       outputSchema: {
+        generatedAt: z.string(),
         periodHours: z.number(),
         totalOrders: z.number(),
         ordersNeedingAttention: z.number(),
-        byCategory: z.object({
+        byIssueCategory: z.object({
           payment_mismatch: z.number(),
           fulfillment_failure: z.number(),
           stuck_processing: z.number(),
           fulfillment_delay: z.number(),
         }),
-        recentActions: z.array(
+        recentAuditActions: z.array(
           z.object({
+            id: z.string(),
             orderId: z.string(),
             action: z.string(),
             reason: z.string(),
