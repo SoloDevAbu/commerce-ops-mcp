@@ -23,7 +23,7 @@ template answer."
 Once the architecture was settled, I broke implementation into separate,
 single-purpose chats rather than one long running conversation:
 
-1. Database layer — schema and client only.
+1. Database layer - schema and client only.
 2. Core services, one at a time, against the requirements already agreed
    in planning.
 3. Tests for the core service logic, once the services were stable.
@@ -72,6 +72,7 @@ be certain of the result.
   abstraction layers - repeated at each implementation stage so later
   chats didn't quietly reintroduce complexity the planning stage had
   already ruled out.
+- Structured skill files (`fastify-best-practices` and `mcp-builder`): Instead of relying on baseline model knowledge, I supplied formal guidelines to ensure the Fastify API layer and the MCP tools adhered to the latest ecosystem standards(from [skills.sh](https://skills.sh)).
 
 ## AI suggestions I corrected, rejected, or substantially changed
 
