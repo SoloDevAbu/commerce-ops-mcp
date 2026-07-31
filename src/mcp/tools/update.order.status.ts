@@ -79,9 +79,9 @@ Returns: For dry_run=true - preview with impact and risk. For dry_run=false - co
           dryRun: z.literal(false),
           success: z.boolean(),
           orderId: z.string(),
-          previousStatus: z.string().optional(),
-          newStatus: z.string().optional(),
-          auditId: z.string().optional(),
+          previousStatus: z.string(),
+          newStatus: z.string(),
+          auditId: z.string(),
         }),
       ]),
 
@@ -104,7 +104,7 @@ Returns: For dry_run=true - preview with impact and risk. For dry_run=false - co
         let text: string;
         if (result.dryRun) {
           text =
-            `DRY RUN - No changes made.\n\n` +
+            `DRY RUN: No changes made.\n\n` +
             `Order: ${result.orderId}\n` +
             `Current Status: ${result.currentStatus}\n` +
             `Proposed Status: ${result.proposedStatus}\n` +

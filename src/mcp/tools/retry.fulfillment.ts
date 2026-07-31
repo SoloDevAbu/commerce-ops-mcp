@@ -49,9 +49,9 @@ Returns: Result object with success status, new order status, and audit record I
       outputSchema: {
         success: z.boolean(),
         orderId: z.string(),
-        message: z.string().optional(),
-        newStatus: z.string().optional(),
-        auditId: z.string().optional(),
+        message: z.string(),
+        newStatus: z.string(),
+        auditId: z.string(),
       },
 
       annotations: {
