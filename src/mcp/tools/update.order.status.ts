@@ -66,24 +66,18 @@ Returns: For dry_run=true - preview with impact and risk. For dry_run=false - co
           ),
       },
 
-      outputSchema: z.discriminatedUnion("dryRun", [
-        z.object({
-          dryRun: z.literal(true),
-          orderId: z.string(),
-          currentStatus: z.string(),
-          proposedStatus: z.string(),
-          impact: z.string(),
-          riskLevel: z.enum(["high", "medium", "low"]),
-        }),
-        z.object({
-          dryRun: z.literal(false),
-          success: z.boolean(),
-          orderId: z.string(),
-          previousStatus: z.string(),
-          newStatus: z.string(),
-          auditId: z.string(),
-        }),
-      ]),
+      outputSchema: {
+        dryRun: z.boolean(),
+        success: z.boolean().optional(),
+        orderId: z.string(),
+        currentStatus: z.string().optional(),
+        proposedStatus: z.string().optional(),
+        impact: z.string().optional(),
+        riskLevel: z.enum(["high", "medium", "low"]).optional(),
+        previousStatus: z.string().optional(),
+        newStatus: z.string().optional(),
+        auditId: z.string().optional(),
+      },
 
       annotations: {
         readOnlyHint: false,
