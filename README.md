@@ -8,13 +8,13 @@ An AI-native **Model Context Protocol (MCP) server** for commerce operations. In
 
 ## MCP Tools
 
-| Tool | Type | Description |
-|------|------|-------------|
-| `commerce_investigate_order` | Read-only | Full investigation of a single order -- root cause, evidence, timeline, recommendation |
-| `commerce_list_pending_investigations` | Read-only | All orders needing attention, grouped by issue category and sorted by severity |
-| `commerce_get_operations_summary` | Read-only | Aggregate metrics + recent audit trail for a configurable time window |
-| `commerce_retry_fulfillment_processing` | Write | Re-submits a failed/stuck order to the fulfillment pipeline (human approval required) |
-| `commerce_update_order_status` | Write | Manual status override with dry-run preview + audit trail (human approval required) |
+| Tool                                    | Type      | Description                                                                            |
+| --------------------------------------- | --------- | -------------------------------------------------------------------------------------- |
+| `commerce_investigate_order`            | Read-only | Full investigation of a single order -- root cause, evidence, timeline, recommendation |
+| `commerce_list_pending_investigations`  | Read-only | All orders needing attention, grouped by issue category and sorted by severity         |
+| `commerce_get_operations_summary`       | Read-only | Aggregate metrics + recent audit trail for a configurable time window                  |
+| `commerce_retry_fulfillment_processing` | Write     | Re-submits a failed/stuck order to the fulfillment pipeline (human approval required)  |
+| `commerce_update_order_status`          | Write     | Manual status override with dry-run preview + audit trail (human approval required)    |
 
 ---
 
@@ -29,13 +29,14 @@ There are two ways to connect this MCP server to Claude: using the **hosted depl
 The server is deployed on Railway and accessible over HTTP. You can connect it to Claude without installing anything.
 
 **Hosted MCP URL:**
+
 ```
 https://commerce-ops-mcp-production.up.railway.app/mcp
 ```
 
-#### Connect via Claude.ai (web)
+#### Connect via Claude.ai (web) or Claude Desktop
 
-1. Open [claude.ai](https://claude.ai) and sign in.
+1. Open [claude.ai](https://claude.ai).
 2. Click your profile icon -> **Settings**.
 3. Go to the **Connectors** tab.
 4. Click **Add custom connector** (or **Add integration**).
@@ -44,26 +45,6 @@ https://commerce-ops-mcp-production.up.railway.app/mcp
    https://commerce-ops-mcp-production.up.railway.app/mcp
    ```
 6. Save. The five commerce tools will appear in your next conversation.
-
-#### Connect via Claude Desktop (hosted URL)
-
-You can also point Claude Desktop at the hosted URL instead of running the server locally. Open your Claude Desktop config file:
-
-- **macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
-- **Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
-
-Add the following entry inside `"mcpServers"`:
-
-```json
-{
-  "mcpServers": {
-    "commerce-ops": {
-      "type": "http",
-      "url": "https://commerce-ops-mcp-production.up.railway.app/mcp"
-    }
-  }
-}
-```
 
 Restart Claude Desktop. The tools will be available immediately -- no local build or database setup needed.
 
@@ -119,7 +100,6 @@ The compiled output is written to `dist/`.
 
 Open your Claude Desktop config file:
 
-- **macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
 - **Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
 
 Navigate to: **Claude Desktop -> Settings -> Developer -> Edit Config**
@@ -148,18 +128,18 @@ Restart Claude Desktop. Claude will launch the server as a subprocess on startup
 
 The seed data covers 10 representative order scenarios:
 
-| Order | Scenario | Issue Category |
-|-------|----------|----------------|
-| ORD-1001 | Fully fulfilled -- happy path | None |
+| Order    | Scenario                                    | Issue Category        |
+| -------- | ------------------------------------------- | --------------------- |
+| ORD-1001 | Fully fulfilled -- happy path               | None                  |
 | ORD-1002 | Payment captured, fulfillment never started | `fulfillment_failure` |
-| ORD-1003 | Inventory unavailable | `fulfillment_failure` |
-| ORD-1004 | Payment status mismatch | `payment_mismatch` |
-| ORD-1005 | Stuck in processing > 6h | `stuck_processing` |
-| ORD-1006 | Fulfillment failed (provider timeout) | `fulfillment_failure` |
-| ORD-1007 | Duplicate fulfillment event | `stuck_processing` |
-| ORD-1008 | Fulfillment delayed (no update for 3h) | `fulfillment_delay` |
-| ORD-1009 | Payment never captured | `payment_mismatch` |
-| ORD-1010 | Previously failed, successfully retried | None (resolved) |
+| ORD-1003 | Inventory unavailable                       | `fulfillment_failure` |
+| ORD-1004 | Payment status mismatch                     | `payment_mismatch`    |
+| ORD-1005 | Stuck in processing > 6h                    | `stuck_processing`    |
+| ORD-1006 | Fulfillment failed (provider timeout)       | `fulfillment_failure` |
+| ORD-1007 | Duplicate fulfillment event                 | `stuck_processing`    |
+| ORD-1008 | Fulfillment delayed (no update for 3h)      | `fulfillment_delay`   |
+| ORD-1009 | Payment never captured                      | `payment_mismatch`    |
+| ORD-1010 | Previously failed, successfully retried     | None (resolved)       |
 
 ---
 
@@ -205,18 +185,18 @@ The action is recorded in the audit log and the outcome is reported back.
 
 ## Available Scripts
 
-| Script | Description |
-|--------|-------------|
-| `pnpm install` | Install all dependencies |
-| `pnpm build` | Compile TypeScript to `dist/` |
-| `pnpm dev` | Run in watch mode via stdio (local development) |
-| `pnpm dev:http` | Run in watch mode via HTTP transport |
-| `pnpm start` | Start the compiled server via stdio |
-| `pnpm start:http` | Start the compiled server via HTTP |
-| `pnpm seed` | Populate the database with 10 synthetic orders |
-| `pnpm db:push` | Push Drizzle schema to the database |
-| `pnpm db:setup` | Push schema + seed in one step |
-| `pnpm test` | Run the test suite |
+| Script            | Description                                     |
+| ----------------- | ----------------------------------------------- |
+| `pnpm install`    | Install all dependencies                        |
+| `pnpm build`      | Compile TypeScript to `dist/`                   |
+| `pnpm dev`        | Run in watch mode via stdio (local development) |
+| `pnpm dev:http`   | Run in watch mode via HTTP transport            |
+| `pnpm start`      | Start the compiled server via stdio             |
+| `pnpm start:http` | Start the compiled server via HTTP              |
+| `pnpm seed`       | Populate the database with 10 synthetic orders  |
+| `pnpm db:push`    | Push Drizzle schema to the database             |
+| `pnpm db:setup`   | Push schema + seed in one step                  |
+| `pnpm test`       | Run the test suite                              |
 
 ---
 
