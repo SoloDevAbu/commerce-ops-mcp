@@ -381,4 +381,74 @@ describe("investigateOrder", () => {
     expect(report.orderId).toBe("ORD-1001");
     expect(report.orderId).not.toContain("uuid");
   });
+
+  it("detects stuck processing with duplicate fulfillment events (deadlock)", async () => {
+    // Two fulfillment_started events in the timeline = deadlock signal
+    const duplicateEvents = [
+      {
+        id: "evt-1",
+        orderId: "uuid-order-1",
+        eventType: "fulfillment_started",
+        description: "First attempt",
+        createdAt: new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString(),
+      },
+      {
+        id: "evt-2",
+        orderId: "uuid-order-1",
+        eventType: "fulfillment_started",
+        description: "Second attempt (duplicate)",
+        createdAt: new Date(Date.now() - 5 * 60 * 60 * 1000).toISOString(),
+      },
+    ];
+
+    setupDbMock({
+      orderRows: [
+        makeOrder({
+          status: "stuck",
+          stuckSince: new Date(Date.now() - 5 * 60 * 60 * 1000).toISOString(),
+        }),
+      ],
+      paymentRows: [makePayment()],
+      fulfillRows: [makeFulfillment({ status: "processing" })],
+      eventRows: duplicateEvents,
+    });
+
+    const investigateOrder = await getService();
+    const report = await investigateOrder("ORD-1001");
+
+    expect(report.riskLevel).toBe("medium");
+    expect(report.automationEligible).toBe(false);
+    expect(report.summary).toMatch(/stuck in processing/i);
+    expect(report.rootCause).toMatch(/duplicate/i);
+    // Evidence should include the duplicate fulfillment event item
+    const dupEvidence = report.evidence.find((e) =>
+      e.label.toLowerCase().includes("duplicate"),
+    );
+    expect(dupEvidence).toBeDefined();
+    expect(dupEvidence?.status).toBe("fail");
+  });
+
+  it("each analyzer is independent — payment mismatch takes priority over stuck", async () => {
+    // Order is stuck AND has a payment mismatch.
+    // Payment mismatch (higher priority) should win.
+    setupDbMock({
+      orderRows: [
+        makeOrder({
+          status: "stuck",
+          stuckSince: new Date(Date.now() - 5 * 60 * 60 * 1000).toISOString(),
+        }),
+      ],
+      paymentRows: [
+        makePayment({ internalStatus: "captured", providerStatus: "failed" }),
+      ],
+      fulfillRows: [makeFulfillment()],
+    });
+
+    const investigateOrder = await getService();
+    const report = await investigateOrder("ORD-1001");
+
+    // Should return payment mismatch, not stuck_processing
+    expect(report.riskLevel).toBe("high");
+    expect(report.summary).toMatch(/divergence/i);
+  });
 });

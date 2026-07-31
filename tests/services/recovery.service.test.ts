@@ -11,17 +11,26 @@ import {
 } from "../../src/types.js";
 
 const mockDbSelect = vi.fn();
-const mockDbUpdate = vi.fn();
-const mockDbInsert = vi.fn();
-const mockDbSet = vi.fn();
-const mockDbWhere = vi.fn();
-const mockDbValues = vi.fn();
+
+// tx stub — used inside db.transaction() callbacks
+const mockTxUpdate = vi.fn();
+const mockTxInsert = vi.fn();
+
+// db.transaction() immediately invokes the callback with the tx stub
+const mockTransaction = vi
+  .fn()
+  .mockImplementation(async (cb: (tx: unknown) => Promise<unknown>) => {
+    const tx = {
+      update: mockTxUpdate,
+      insert: mockTxInsert,
+    };
+    return cb(tx);
+  });
 
 vi.mock("../../src/db/index.js", () => ({
   db: {
     select: mockDbSelect,
-    update: mockDbUpdate,
-    insert: mockDbInsert,
+    transaction: mockTransaction,
   },
 }));
 
@@ -105,21 +114,31 @@ function setupSelectMock({
     .mockReturnValueOnce(fulfillChain);
 }
 
-// Configures update and insert chains (used in write operations)
-function setupWriteMocks() {
+// Configures tx.update and tx.insert chains used inside db.transaction()
+function setupTxWriteMocks() {
   const updateChain = {
     set: vi.fn().mockReturnThis(),
     where: vi.fn().mockResolvedValue([]),
   };
   const insertChain = { values: vi.fn().mockResolvedValue([]) };
-  mockDbUpdate.mockReturnValue(updateChain);
-  mockDbInsert.mockReturnValue(insertChain);
+  mockTxUpdate.mockReturnValue(updateChain);
+  mockTxInsert.mockReturnValue(insertChain);
   return { updateChain, insertChain };
+}
+
+function restoreTransactionMock() {
+  mockTransaction.mockImplementation(
+    async (cb: (tx: unknown) => Promise<unknown>) => {
+      const tx = { update: mockTxUpdate, insert: mockTxInsert };
+      return cb(tx);
+    },
+  );
 }
 
 describe("retryFulfillmentProcessing", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    restoreTransactionMock();
   });
 
   async function getService() {
@@ -211,7 +230,7 @@ describe("retryFulfillmentProcessing", () => {
 
   it("succeeds for a stuck order with captured payment and failed fulfillment", async () => {
     setupSelectMock();
-    setupWriteMocks();
+    setupTxWriteMocks();
 
     const retry = await getService();
     const result = await retry("ORD-1001", "manual ops retry");
@@ -219,12 +238,18 @@ describe("retryFulfillmentProcessing", () => {
     expect(result.success).toBe(true);
     expect(result.orderId).toBe("ORD-1001"); // human-readable
     expect(result.newStatus).toBe("processing");
+
+    // Writes must be wrapped in a single transaction
+    expect(mockTransaction).toHaveBeenCalledOnce();
+
+    // writeAudit receives (params, tx) — second arg is the tx stub
     expect(mockWriteAudit).toHaveBeenCalledOnce();
     expect(mockWriteAudit).toHaveBeenCalledWith(
       expect.objectContaining({
         action: "retry_fulfillment",
         reason: "manual ops retry",
       }),
+      expect.anything(), // tx argument
     );
   });
 
@@ -233,19 +258,33 @@ describe("retryFulfillmentProcessing", () => {
       orderRows: [makeOrder({ status: "processing" })],
       fulfillRows: [], // no fulfillment record
     });
-    setupWriteMocks();
+    setupTxWriteMocks();
 
     const retry = await getService();
     const result = await retry("ORD-1001", "create new fulfillment");
 
     expect(result.success).toBe(true);
-    // db.insert should have been called (for new fulfillment row + event row)
-    expect(mockDbInsert).toHaveBeenCalled();
+    // tx.insert should have been called (for new fulfillment row + event row)
+    expect(mockTxInsert).toHaveBeenCalled();
+  });
+
+  it("all mutations execute inside a single transaction (atomicity)", async () => {
+    setupSelectMock();
+    setupTxWriteMocks();
+
+    const retry = await getService();
+    await retry("ORD-1001", "atomicity check");
+
+    // Exactly one transaction wrapping all writes
+    expect(mockTransaction).toHaveBeenCalledOnce();
+    // Writes go through tx, not bare db.*
+    expect(mockTxUpdate).toHaveBeenCalled();
+    expect(mockTxInsert).toHaveBeenCalled();
   });
 
   it("returns human-readable orderId (not UUID) in result", async () => {
     setupSelectMock();
-    setupWriteMocks();
+    setupTxWriteMocks();
 
     const retry = await getService();
     const result = await retry("ORD-1001", "reason");
@@ -258,6 +297,7 @@ describe("retryFulfillmentProcessing", () => {
 describe("updateOrderStatus", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    restoreTransactionMock();
   });
 
   async function getService() {
@@ -314,8 +354,8 @@ describe("updateOrderStatus", () => {
       expect(result.proposedStatus).toBe("processing");
       expect(result.riskLevel).toBe("low");
     }
-    // No DB writes in dry-run
-    expect(mockDbUpdate).not.toHaveBeenCalled();
+    // No DB writes in dry-run — transaction must NOT be called
+    expect(mockTransaction).not.toHaveBeenCalled();
     expect(mockWriteAudit).not.toHaveBeenCalled();
   });
 
@@ -362,9 +402,9 @@ describe("updateOrderStatus", () => {
     }
   });
 
-  it("executes status update and writes audit when dryRun=false", async () => {
+  it("executes status update and writes audit inside transaction when dryRun=false", async () => {
     setupOrderSelect([makeOrder({ status: "stuck" })]);
-    setupWriteMocks();
+    setupTxWriteMocks();
 
     const update = await getService();
     const result = await update(
@@ -381,10 +421,23 @@ describe("updateOrderStatus", () => {
       expect(result.previousStatus).toBe("stuck");
       expect(result.newStatus).toBe("processing");
     }
-    expect(mockDbUpdate).toHaveBeenCalled();
+    // Must use transaction (not bare db.update)
+    expect(mockTransaction).toHaveBeenCalledOnce();
+    expect(mockTxUpdate).toHaveBeenCalled();
     expect(mockWriteAudit).toHaveBeenCalledWith(
       expect.objectContaining({ action: "update_order_status" }),
+      expect.anything(), // tx argument
     );
+  });
+
+  it("all mutations execute inside a single transaction (atomicity)", async () => {
+    setupOrderSelect([makeOrder({ status: "stuck" })]);
+    setupTxWriteMocks();
+
+    const update = await getService();
+    await update("ORD-1001", "processing", "atomicity check", false);
+
+    expect(mockTransaction).toHaveBeenCalledOnce();
   });
 
   it("defaults to dry-run=true when dryRun parameter is omitted", async () => {
@@ -393,7 +446,7 @@ describe("updateOrderStatus", () => {
     const result = await update("ORD-1001", "processing", "reason"); // no dryRun arg
 
     expect(result.dryRun).toBe(true);
-    expect(mockDbUpdate).not.toHaveBeenCalled();
+    expect(mockTransaction).not.toHaveBeenCalled();
   });
 
   it("returns human-readable orderId in all response shapes", async () => {
@@ -405,8 +458,9 @@ describe("updateOrderStatus", () => {
 
     // live shape
     vi.clearAllMocks();
+    restoreTransactionMock();
     setupOrderSelect([makeOrder({ status: "stuck" })]);
-    setupWriteMocks();
+    setupTxWriteMocks();
     const liveResult = await update("ORD-1001", "processing", "r", false);
     expect(liveResult.orderId).toBe("ORD-1001");
   });
