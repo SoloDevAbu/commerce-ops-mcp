@@ -15,6 +15,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import "dotenv/config";
 
 const MCP_URL = process.env.MCP_HOSTED_URL ?? "http://localhost:3000/mcp";
 
