@@ -155,21 +155,27 @@ describe("retryFulfillmentProcessing", () => {
     mockDbSelect.mockReturnValueOnce(ordersChain);
 
     const retry = await getService();
-    await expect(retry("ORD-NONE", "test", true)).rejects.toThrow(OrderNotFoundError);
+    await expect(retry("ORD-NONE", "test", true)).rejects.toThrow(
+      OrderNotFoundError,
+    );
   });
 
   it("throws InvalidStateError when order is in non-retryable status (fulfilled)", async () => {
     setupSelectMock({ orderRows: [makeOrder({ status: "fulfilled" })] });
 
     const retry = await getService();
-    await expect(retry("ORD-1001", "test", true)).rejects.toThrow(InvalidStateError);
+    await expect(retry("ORD-1001", "test", true)).rejects.toThrow(
+      InvalidStateError,
+    );
   });
 
   it("throws InvalidStateError when order is in non-retryable status (cancelled)", async () => {
     setupSelectMock({ orderRows: [makeOrder({ status: "cancelled" })] });
 
     const retry = await getService();
-    await expect(retry("ORD-1001", "test", true)).rejects.toThrow(InvalidStateError);
+    await expect(retry("ORD-1001", "test", true)).rejects.toThrow(
+      InvalidStateError,
+    );
   });
 
   it("throws InvalidStateError when payment is not captured", async () => {
@@ -178,14 +184,18 @@ describe("retryFulfillmentProcessing", () => {
     });
 
     const retry = await getService();
-    await expect(retry("ORD-1001", "test", true)).rejects.toThrow(InvalidStateError);
+    await expect(retry("ORD-1001", "test", true)).rejects.toThrow(
+      InvalidStateError,
+    );
   });
 
   it("throws InvalidStateError when payment is missing", async () => {
     setupSelectMock({ paymentRows: [] });
 
     const retry = await getService();
-    await expect(retry("ORD-1001", "test", true)).rejects.toThrow(InvalidStateError);
+    await expect(retry("ORD-1001", "test", true)).rejects.toThrow(
+      InvalidStateError,
+    );
   });
 
   it("throws InvalidStateError when fulfillment is already processing", async () => {
@@ -194,7 +204,9 @@ describe("retryFulfillmentProcessing", () => {
     });
 
     const retry = await getService();
-    await expect(retry("ORD-1001", "test", true)).rejects.toThrow(InvalidStateError);
+    await expect(retry("ORD-1001", "test", true)).rejects.toThrow(
+      InvalidStateError,
+    );
   });
 
   it("throws InventoryUnavailableError when failure reason contains 'inventory'", async () => {
@@ -425,6 +437,83 @@ describe("updateOrderStatus", () => {
     if (result.dryRun) {
       expect(result.riskLevel).toBe("medium");
     }
+  });
+
+  it("rejects transition from terminal state: fulfilled → processing", async () => {
+    setupOrderSelect([makeOrder({ status: "fulfilled" })]);
+    const update = await getService();
+    await expect(
+      update("ORD-1001", "processing", "un-fulfill", true),
+    ).rejects.toThrow(InvalidStateError);
+  });
+
+  it("rejects transition from terminal state: cancelled → processing", async () => {
+    setupOrderSelect([makeOrder({ status: "cancelled" })]);
+    const update = await getService();
+    await expect(
+      update("ORD-1001", "processing", "un-cancel", true),
+    ).rejects.toThrow(InvalidStateError);
+  });
+
+  it("rejects invalid transition: pending → fulfilled", async () => {
+    setupOrderSelect([makeOrder({ status: "pending" })]);
+    const update = await getService();
+    await expect(
+      update("ORD-1001", "fulfilled", "skip ahead", true),
+    ).rejects.toThrow(InvalidStateError);
+  });
+
+  it("rejects invalid transition: pending → stuck", async () => {
+    setupOrderSelect([makeOrder({ status: "pending" })]);
+    const update = await getService();
+    await expect(
+      update("ORD-1001", "stuck", "mark stuck", true),
+    ).rejects.toThrow(InvalidStateError);
+  });
+
+  it("allows valid transition: pending → processing", async () => {
+    setupOrderSelect([makeOrder({ status: "pending" })]);
+    const update = await getService();
+    const result = await update("ORD-1001", "processing", "begin", true);
+    expect(result.dryRun).toBe(true);
+    // No error thrown = transition is allowed
+  });
+
+  it("allows valid transition: processing → cancelled", async () => {
+    setupOrderSelect([makeOrder({ status: "processing" })]);
+    const update = await getService();
+    const result = await update(
+      "ORD-1001",
+      "cancelled",
+      "customer request",
+      true,
+    );
+    expect(result.dryRun).toBe(true);
+  });
+
+  it("allows valid transition: stuck → processing", async () => {
+    setupOrderSelect([makeOrder({ status: "stuck" })]);
+    const update = await getService();
+    const result = await update("ORD-1001", "processing", "un-stick", true);
+    expect(result.dryRun).toBe(true);
+  });
+
+  it("includes 'none (terminal state)' in error message for terminal source", async () => {
+    setupOrderSelect([makeOrder({ status: "fulfilled" })]);
+    const update = await getService();
+    try {
+      await update("ORD-1001", "processing", "test", true);
+    } catch (e) {
+      expect((e as Error).message).toContain("none (terminal state)");
+    }
+  });
+
+  it("rejects transition from fulfilled (terminal state)", async () => {
+    setupOrderSelect([makeOrder({ status: "fulfilled" })]);
+    const update = await getService();
+    await expect(
+      update("ORD-1001", "cancelled", "reverse", true),
+    ).rejects.toThrow(InvalidStateError);
   });
 
   it("executes status update and writes audit inside transaction when dryRun=false", async () => {

@@ -29,6 +29,7 @@ import {
   type RetryResult,
   type StatusUpdateResult,
 } from "../types.js";
+import { VALID_TRANSITIONS } from "../constants.js";
 
 /**
  * Valid source statuses that permit a fulfillment retry.
@@ -241,6 +242,17 @@ export async function updateOrderStatus(
   if (order.status === newStatus) {
     throw new InvalidStateError(
       `Order ${orderId} is already in status "${newStatus}". No change needed.`,
+    );
+  }
+
+  // Enforce strict transition rules
+  const allowedNext = VALID_TRANSITIONS[order.status];
+  if (!allowedNext || !allowedNext.includes(newStatus)) {
+    throw new InvalidStateError(
+      `Cannot transition order ${orderId} from "${order.status}" to "${newStatus}". ` +
+        `Valid transitions from "${order.status}": ${
+          allowedNext?.length ? allowedNext.join(", ") : "none (terminal state)"
+        }.`,
     );
   }
 
