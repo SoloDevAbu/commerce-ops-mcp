@@ -32,6 +32,18 @@ import {
 import { VALID_TRANSITIONS } from "../constants.js";
 
 /**
+ * Checks if an error is a PostgreSQL unique constraint violation (code 23505).
+ * Used to gracefully handle concurrent duplicate operations via idempotency keys.
+ */
+function isUniqueViolation(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    "code" in error &&
+    (error as { code: string }).code === "23505"
+  );
+}
+
+/**
  * Valid source statuses that permit a fulfillment retry.
  * Orders in these states have had their payment confirmed and merely need
  * the fulfillment pipeline to be re-triggered.
@@ -47,7 +59,7 @@ export async function retryFulfillmentProcessing(
 ): Promise<RetryResult> {
   const now = new Date().toISOString();
 
-  // Step 1: Resolve human-readable orderId → internal UUID
+  // Step 1: Read order outside tx for early validation / preview mode
   const orderRows = await db
     .select()
     .from(orders)
@@ -56,7 +68,7 @@ export async function retryFulfillmentProcessing(
   const order = orderRows[0];
   if (!order) throw new OrderNotFoundError(orderId);
 
-  // Step 2: Fetch related records using UUID
+  // Step 2: Fetch related records for preview validation
   const internalId = order.id;
   const [paymentRows, fulfillmentRows] = await Promise.all([
     db.select().from(payments).where(eq(payments.orderId, internalId)),
@@ -118,52 +130,92 @@ export async function retryFulfillmentProcessing(
     };
   }
 
-  // Execute recovery — all writes are wrapped in a single transaction so that
-  // a mid-flight crash leaves the database in a consistent state.
-  await db.transaction(async (tx) => {
-    if (ful) {
-      await tx
-        .update(fulfillment)
-        .set({
+  // Execute recovery inside a transaction with row lock to prevent concurrent mutations.
+  const idempotencyKey = `retry_fulfillment:${orderId}`;
+
+  try {
+    await db.transaction(async (tx) => {
+      // Re-read order with FOR UPDATE lock — prevents concurrent retries
+      const [lockedOrder] = await tx
+        .select()
+        .from(orders)
+        .where(eq(orders.orderId, orderId))
+        .for("update");
+
+      if (!lockedOrder) throw new OrderNotFoundError(orderId);
+
+      // Re-validate inside the lock — state may have changed since preview
+      if (!RETRYABLE_ORDER_STATUSES.has(lockedOrder.status)) {
+        throw new InvalidStateError(
+          `Order ${orderId} is no longer in a retryable state (current: "${lockedOrder.status}"). ` +
+            `Another operation may have already processed this order.`,
+        );
+      }
+
+      // Re-fetch fulfillment inside tx
+      const [lockedFul] = await tx
+        .select()
+        .from(fulfillment)
+        .where(eq(fulfillment.orderId, lockedOrder.id));
+
+      if (lockedFul) {
+        await tx
+          .update(fulfillment)
+          .set({
+            status: "processing",
+            failureReason: null,
+            startedAt: now,
+            updatedAt: now,
+          })
+          .where(eq(fulfillment.orderId, lockedOrder.id));
+      } else {
+        await tx.insert(fulfillment).values({
+          id: randomUUID(),
+          orderId: lockedOrder.id,
           status: "processing",
-          failureReason: null,
           startedAt: now,
           updatedAt: now,
-        })
-        .where(eq(fulfillment.orderId, internalId));
-    } else {
-      await tx.insert(fulfillment).values({
+        });
+      }
+
+      await tx
+        .update(orders)
+        .set({ status: "processing", updatedAt: now, stuckSince: null })
+        .where(eq(orders.id, lockedOrder.id));
+
+      await tx.insert(orderEvents).values({
         id: randomUUID(),
-        orderId: internalId,
-        status: "processing",
-        startedAt: now,
-        updatedAt: now,
+        orderId: lockedOrder.id,
+        eventType: "fulfillment_retried",
+        description: `Fulfillment retried by operations. Reason: ${reason}`,
+        createdAt: now,
       });
-    }
 
-    await tx
-      .update(orders)
-      .set({ status: "processing", updatedAt: now, stuckSince: null })
-      .where(eq(orders.id, internalId));
-
-    await tx.insert(orderEvents).values({
-      id: randomUUID(),
-      orderId: internalId,
-      eventType: "fulfillment_retried",
-      description: `Fulfillment retried by operations. Reason: ${reason}`,
-      createdAt: now,
+      await writeAudit(
+        {
+          orderId: lockedOrder.id,
+          action: "retry_fulfillment",
+          reason,
+          outcome: "Fulfillment restarted — status set to processing",
+          idempotencyKey,
+        },
+        tx,
+      );
     });
-
-    await writeAudit(
-      {
-        orderId: internalId,
-        action: "retry_fulfillment",
-        reason,
-        outcome: "Fulfillment restarted — status set to processing",
-      },
-      tx,
-    );
-  });
+  } catch (error: unknown) {
+    // Gracefully handle concurrent duplicate retries via idempotency key
+    if (isUniqueViolation(error)) {
+      return {
+        confirmed: true,
+        success: true,
+        orderId: order.orderId,
+        message: `Fulfillment retry for ${order.orderId} was already processed.`,
+        newStatus: "processing",
+        auditId: "(already recorded)",
+      };
+    }
+    throw error;
+  }
 
   return {
     confirmed: true,
@@ -276,39 +328,72 @@ export async function updateOrderStatus(
     throw new ApprovalRequiredError();
   }
 
-  // Execute update — all writes are wrapped in a single transaction.
-  const internalId = order.id;
+  // Execute update inside a transaction with row lock to prevent concurrent mutations.
   const now = new Date().toISOString();
   const previousStatus = order.status;
+  const idempotencyKey = `update_status:${orderId}:${previousStatus}:${newStatus}`;
 
-  await db.transaction(async (tx) => {
-    await tx
-      .update(orders)
-      .set({
-        status: newStatus,
-        updatedAt: now,
-        stuckSince: newStatus === "stuck" ? now : null,
-      })
-      .where(eq(orders.id, internalId));
+  try {
+    await db.transaction(async (tx) => {
+      // Re-read with row lock — prevents concurrent updates
+      const [lockedOrder] = await tx
+        .select()
+        .from(orders)
+        .where(eq(orders.orderId, orderId))
+        .for("update");
 
-    await tx.insert(orderEvents).values({
-      id: randomUUID(),
-      orderId: internalId,
-      eventType: "status_updated",
-      description: `Status manually updated: "${previousStatus}" → "${newStatus}". Reason: ${reason}`,
-      createdAt: now,
+      if (!lockedOrder) throw new OrderNotFoundError(orderId);
+
+      // Re-validate — status may have changed since preview
+      if (lockedOrder.status !== previousStatus) {
+        throw new InvalidStateError(
+          `Order ${orderId} status changed to "${lockedOrder.status}" since preview. ` +
+            `Please re-run with dryRun=true to get an updated preview.`,
+        );
+      }
+
+      await tx
+        .update(orders)
+        .set({
+          status: newStatus,
+          updatedAt: now,
+          stuckSince: newStatus === "stuck" ? now : null,
+        })
+        .where(eq(orders.id, lockedOrder.id));
+
+      await tx.insert(orderEvents).values({
+        id: randomUUID(),
+        orderId: lockedOrder.id,
+        eventType: "status_updated",
+        description: `Status manually updated: "${previousStatus}" → "${newStatus}". Reason: ${reason}`,
+        createdAt: now,
+      });
+
+      await writeAudit(
+        {
+          orderId: lockedOrder.id,
+          action: "update_order_status",
+          reason,
+          outcome: `Status changed from "${previousStatus}" to "${newStatus}"`,
+          idempotencyKey,
+        },
+        tx,
+      );
     });
-
-    await writeAudit(
-      {
-        orderId: internalId,
-        action: "update_order_status",
-        reason,
-        outcome: `Status changed from "${previousStatus}" to "${newStatus}"`,
-      },
-      tx,
-    );
-  });
+  } catch (error: unknown) {
+    // Gracefully handle concurrent duplicate updates via idempotency key
+    if (isUniqueViolation(error)) {
+      return {
+        dryRun: false,
+        success: true,
+        orderId: order.orderId,
+        previousStatus,
+        newStatus,
+        auditId: "(already recorded)",
+      };
+    }
+    throw error;
+  }
 
   return {
     dryRun: false,
