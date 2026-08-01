@@ -1,173 +1,70 @@
 # AI Worklog
 
-## Tools and models used, and why
+This document outlines how AI was leveraged to accelerate planning, implementation, and verification, while ensuring architectural ownership and product quality remained strictly human-driven.
 
-| Stage                                    | Tool                   | Model                       | Why this one                                                                                                                                                                                                                          |
-| ---------------------------------------- | ---------------------- | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Planning & architecture decisions        | Claude (web)           | Sonnet 5, extended thinking | Needed a model that could reason through trade-offs (monorepo vs. flat, SQLite vs. managed Postgres) rather than just pattern-match to a template. Thinking mode surfaced the actual trade-offs instead of a single confident answer. |
-| Scaffolding & implementation             | Antigravity (Pro)      | Sonnet 4.6, thinking        | Best model available to me in that environment for sustained, multi-file TypeScript generation with direct file-system access.                                                                                                        |
-| Cross-verification of architecture calls | Claude (web) + ChatGPT | Sonnet 5 / GPT              | When a recommendation felt off, I put the same question to a second model before accepting it, rather than taking one model's word as final.                                                                                          |
-| Running the deployed MCP                 | Claude (web)           | Sonnet 5                    | The assignment explicitly says not to build a frontend, Claude web already has a working MCP client, so connecting the hosted URL there gave me a real consumer of the tools with zero UI work.                                       |
-| Local tool verification                  | Claude Desktop         | —                           | Used for stdio-transport verification against the same codebase before deploying the HTTP transport, so I had two independent transports validated, not just one.                                                                     |
-| Core-logic verification                  | Vitest                 | —                           | Unit/integration tests against the service layer directly (not through MCP), so business logic correctness didn't depend on the transport working.                                                                                    |
+## 1. Tools and Models Used
 
-## How I used AI to plan and break down the work
+| Stage | Tool | Model | Rationale |
+| :--- | :--- | :--- | :--- |
+| Planning & architecture decisions | Claude (web) | Sonnet 5, extended thinking | Needed a model that could reason through trade-offs (monorepo vs. flat, SQLite vs. managed Postgres) rather than just pattern-match to a template. Thinking mode surfaced the actual trade-offs instead of a single confident answer. |
+| Scaffolding & implementation | Antigravity (Pro) | Sonnet 4.6, thinking | Best model available to me in that environment for sustained, multi-file TypeScript generation with direct file-system access. |
+| Cross-verification of architecture calls | Claude (web) + ChatGPT | Sonnet 5 / GPT | When a recommendation felt off, I put the same question to a second model before accepting it, rather than taking one model's word as final. |
+| Running the deployed MCP | Claude (web) | Sonnet 5 | The assignment explicitly says not to build a frontend, Claude web already has a working MCP client, so connecting the hosted URL there gave me a real consumer of the tools with zero UI work. |
+| Local tool verification | Claude Desktop | — | Used for stdio-transport verification against the same codebase before deploying the HTTP transport, so I had two independent transports validated, not just one. |
+| Core-logic verification | Vitest | — | Unit/integration tests against the service layer directly (not through MCP), so business logic correctness didn't depend on the transport working. |
 
-I ran the planning phase as an explicit design conversation before any
-code: product scope, target user, MCP tool surface, database choice, and
-repo layout, in that order. I deliberately asked for the reasoning behind
-each recommendation, not just the recommendation, so I could tell the
-difference between "this is a real constraint" and "this is a default
-template answer."
+## 2. Development Strategy
 
-Once the architecture was settled, I broke implementation into separate,
-single-purpose chats rather than one long running conversation:
+I ran the planning phase as an explicit design conversation *before* writing any code. I established the product scope, target user, MCP tool surface, database choice, and repository layout. I deliberately asked the AI for the reasoning behind its recommendations to differentiate between real constraints and default templates.
 
-1. Database layer - schema and client only.
-2. Core services, one at a time, against the requirements already agreed
-   in planning.
-3. Tests for the core service logic, once the services were stable.
-4. MCP tool layer and shared lib files.
-5. MCP server export/registration.
-6. Fastify HTTP transport (hosted) and stdio transport (Claude Desktop).
+Once the architecture was settled, I avoided using a single, long-running chat. Instead, I broke the implementation into focused, single-purpose sessions:
+1. **Database Layer:** Schema and client configuration.
+2. **Core Services:** Implemented one at a time against agreed-upon requirements.
+3. **Unit Testing:** Unit tests for core logic using in-memory mocks to stabilize the service layer.
+4. **MCP Tool Layer:** Tool definitions, input validation, and shared utilities.
+5. **Transports & Deployment:** Fastify HTTP and `stdio` server registration.
+6. **Integration Testing & Smoke Checks:** After completing the core project and receiving review feedback, I expanded the test suite to include PostgreSQL-backed integration tests (to verify mutation side-effects and concurrency locking) and a hosted MCP smoke check (to perform initialization, list tools, and call at least one tool over HTTP).
 
-The reasoning for splitting this way: a single long-running chat
-accumulates irrelevant context, and I found that increased the odds of
-the model quietly drifting from earlier decisions or inventing details
-that weren't there. Scoping each chat to one layer kept the context
-window relevant to the file actually being written, and made it obvious
-when an output didn't match what had already been built (nothing to
-cross-reference against a huge prior transcript).
+This compartmentalization prevented the AI's context window from degrading, reduced hallucinations, and ensured strict adherence to previously agreed-upon architectural boundaries.
 
-## Division of responsibility
+## 3. Division of Responsibility
 
-I owned every product and architecture decision - the workflow to build,
-the tool surface, the database choice, the repo shape, what to exclude.
-AI tools were used to (a) generate options and trade-offs for me to
-decide between, and (b) produce the implementation once a decision was
-made. I did not accept a first-pass architectural recommendation without
-asking for the reasoning behind it, and for the two decisions that
-mattered most (see below), I deliberately cross-checked one model's
-recommendation against another before committing.
+I maintained absolute ownership over product and architecture decisions. The AI was used to generate options, weigh trade-offs, and produce boilerplate once a decision was finalized. 
 
-I read and manually verified every generated file - service logic,
-schema, MCP tool descriptions, transport wiring - rather than reviewing
-only the parts that failed to run. Where code worked but didn't meet a
-clean-code bar I wanted (unclear naming, logic that belonged in a
-different layer, missing edge-case handling), I corrected it myself
-rather than re-prompting for a fix, since it was often faster and I could
-be certain of the result.
+I manually reviewed every generated file. If the code worked but failed to meet clean-code standards (e.g., unclear naming, blurred layer boundaries, missing edge cases), I corrected it manually rather than relying on iterative prompting, ensuring deterministic quality control.
 
-## Important context/instructions I supplied
+## 4. Key Constraints Supplied to the AI
 
-- The target user (ops executive, not developer/customer) and the single
-  workflow to optimize for, stated up front so every downstream decision
-  had a fixed reference point.
-- An explicit instruction to prioritize industry best practices and clean,
-  maintainable code even though this is a scoped take-home - this shaped
-  things like keeping the rule engine as a pure, testable function
-  separate from I/O, and centralizing all audit-log writes through one
-  function instead of writing them ad hoc.
-- A constraint to not overbuild: no frontend, no auth, no speculative
-  abstraction layers - repeated at each implementation stage so later
-  chats didn't quietly reintroduce complexity the planning stage had
-  already ruled out.
-- Structured skill files (`fastify-best-practices` and `mcp-builder`): Instead of relying on baseline model knowledge, I supplied formal guidelines to ensure the Fastify API layer and the MCP tools adhered to the latest ecosystem standards(from [skills.sh](https://skills.sh)).
+To keep the AI focused, I explicitly enforced the following constraints during generation:
+- **Target User:** Operations executives (optimizing for actionable reports, not raw JSON payloads).
+- **Architecture over Speed:** Explicit instructions to prioritize clean, maintainable code. This ensured the rule engine remained a pure function, and all audit logging was strictly centralized.
+- **Strict Scope Boundaries:** No frontend, no authentication, and no speculative abstraction layers (e.g., controllers, DTOs).
+- **Best Practices:** Provided structured skill files (`mcp-builder`, `fastify-best-practices`) to force adherence to the latest ecosystem standards rather than relying on stale baseline training data.
 
-## AI suggestions I corrected, rejected, or substantially changed
+## 5. AI Suggestions Rejected or Modified
 
-**1. Monorepo vs. flat repo.** One planning pass recommended an
-`apps/` + `packages/` monorepo split, reasoning that it "naturally
-separates concerns." I rejected this: there is exactly one deployable
-service here, and a workspace split only pays for itself with multiple
-deployables or multiple consumers of shared code, neither of which apply.
-The monorepo suggestion was solving a problem this project doesn't have.
+**1. Monorepo vs. Flat Repo:** 
+The AI initially recommended an `apps/` + `packages/` monorepo split to "naturally separate concerns." **I rejected this.** There is exactly one deployable service. A workspace split introduces build complexity that only pays off with multiple deployables or shared code consumers.
 
-**2. Database choice.** The first recommendation was SQLite, for
-zero-infrastructure local simplicity. I initially accepted that reasoning
-for local development, but reconsidered it for the _deployed_ target:
-Railway's disk for a service like this isn't guaranteed to persist
-across restarts, which risked the seed data silently disappearing during
-evaluation. I switched to Neon Postgres - serverless, no maintenance
-burden on me, and durable independent of the Railway container's own
-lifecycle. This was the larger of the two changes: it meant swapping the
-Drizzle driver and the connection setup in `db/client.ts`, though the
-schema and service layer above it were unaffected since Drizzle's query
-API is the same across both.
+**2. Database Choice:** 
+The AI recommended SQLite for zero-infrastructure local simplicity. While excellent for local dev, **I rejected it for the deployed target.** The host environment (Railway) does not guarantee disk persistence across ephemeral container restarts, risking silent data loss during evaluation. I forced a pivot to Neon Postgres (Serverless) to guarantee state durability, updating the Drizzle driver and connection logic while keeping the underlying schema intact.
 
-## How I verified AI-generated work
+## 6. Verification & Testing
 
-- **Unit tests (Vitest)** against the service layer directly,
-  covering every branch of the diagnosis rule engine (payment/provider
-  mismatch, fulfillment failure with and without an inventory cause, the
-  stuck-in-processing timeout, and the clean happy path). These tests use
-  in-memory mocks and do not require a database. Run with `pnpm test`.
+AI-generated code was heavily scrutinized using a multi-layered testing strategy, specifically designed to prove the safety and idempotency of the mutation boundaries:
 
-- **PostgreSQL-backed integration tests** (`tests/integration/recovery.integration.test.ts`)
-  against a real Neon Postgres instance with no mocking. Each test seeds its own
-  isolated rows via `seedTestOrder()` and truncates all tables in `beforeEach`.
-  The suite covers:
-  - Mutation side effects (order status, fulfillment record, order events, audit row
-    all updated atomically in a single transaction).
-  - Approval enforcement (`confirmed=false` returns a preview and writes zero rows;
-    `dryRun=false + confirmed=false` throws `ApprovalRequiredError`).
-  - Idempotency on duplicate retries (second call on an already-retried order is
-    rejected via `InvalidStateError` once the order leaves a retryable state).
-  - Concurrent retries (`Promise.allSettled` fires two calls simultaneously;
-    `FOR UPDATE` row locking and the unique constraint on `idempotencyKey` ensure
-    exactly one audit row is written).
-  - Valid and invalid state transitions (all allowed edges and all blocked edges
-    against `VALID_TRANSITIONS`, including terminal states).
-  - Audit trail integrity (action, reason, outcome, idempotencyKey, and
-    performedAt are all verified field-by-field).
-  Run with: `pnpm test:integration` (requires `DATABASE_URL` to be set).
+- **Unit Tests (Vitest):** Tests the service layer directly, covering every branch of the diagnostic rule engine using in-memory mocks. Run via `pnpm test`.
+- **PostgreSQL-Backed Integration Tests:** Added recently based on review feedback. Runs against a real Neon Postgres instance, utilizing `seedTestOrder()` and truncating tables between runs. This specifically verifies:
+  - **Mutation Side Effects:** Validates atomic updates to orders, fulfillment, and events.
+  - **Approval Enforcement:** Proves that missing `confirmed=true` blocks execution (`ApprovalRequiredError`).
+  - **Idempotency & Concurrency:** Proves that concurrent retries (`Promise.allSettled`) are safely handled via `FOR UPDATE` row locking, ensuring exactly one audit row is written.
+  - **Valid Transitions:** Ensures terminal states cannot be mutated.
+  - **Audit Integrity:** Validates that every write generates a permanent, accurate audit log entry.
+- **Hosted MCP Smoke Check:** Added alongside integration tests to connect to the deployed `Streamable HTTP` endpoint, perform MCP initialization, list all registered tools, and successfully call at least one tool against the hosted endpoint.
+- **Client Verification:** Verified locally via Claude Desktop (`stdio`) and remotely via Claude.ai (`HTTP`) to ensure real-world compatibility.
 
-- **Hosted MCP smoke check** (`tests/smoke/mcp-hosted.test.ts`) over Streamable
-  HTTP using the official `@modelcontextprotocol/sdk` TypeScript client. The
-  suite:
-  - Initializes a real MCP client session against the hosted endpoint via
-    `StreamableHTTPClientTransport`.
-  - Calls `client.listTools()` and asserts all 5 registered tool names are
-    present.
-  - Calls `commerce_get_operations_summary`, `commerce_investigate_order`, and
-    `commerce_list_pending_investigations` end-to-end and asserts the responses
-    are non-error and contain expected content.
-  This validates the transport wiring, CORS config, and Neon connection all
-  work correctly together in the deployed environment.
-  Run with: `pnpm test:smoke` (defaults to `http://localhost:3000/mcp`;
-  override with `MCP_HOSTED_URL=<url> pnpm test:smoke`).
-
-- **Claude Desktop over stdio** against the same codebase, to confirm the
-  tools behave correctly through an actual MCP client, not just through
-  direct function calls in tests.
-
-- **Claude web against the hosted Streamable HTTP endpoint**, to confirm
-  the deployed transport, CORS configuration, and Neon connection all
-  work together in the actual environment evaluators will hit - this is
-  the same demonstration used in the Loom recording.
-
-- **Manual code review** of every generated file rather than only the
-  parts that failed at runtime - checking that tool descriptions
-  accurately state their safety requirements, that write paths are all
-  routed through the single audit-logging function, and that layer
-  boundaries (tools -> services -> data access) were actually respected
-  rather than blurred under time pressure.
-
-## Remaining risks or unfinished work
-
-- Diagnosis thresholds (e.g. the processing-stuck window) are reasonable
-  illustrative constants, not tuned against real operational data.
-- No pagination on the pending-investigations list - a real constraint
-  only at a scale well beyond this synthetic dataset.
-- No auth or rate limiting on the hosted endpoint - acceptable for a
-  synthetic-data evaluation deployment, not for a production system
-  handling real orders.
-- The `automationEligible` flag marks which fixes could be safely
-  auto-retried without human approval, but that auto-retry path itself is
-  intentionally not built - flagged as a natural next step rather than
-  something I ran out of time on unexpectedly.
-- The integration test suite (`pnpm test:integration`) requires `DATABASE_URL`
-  to be set and runs against the real Neon Postgres instance, so it is not
-  suitable for ephemeral CI environments without a database. The unit test
-  suite (`pnpm test`) runs without any database dependency and covers the
-  service-layer business logic in isolation.
+## 7. Remaining Risks & Unfinished Work
+- **Threshold Tuning:** The 4-hour "stuck" window is an illustrative constant and needs tuning against real operational data.
+- **Pagination:** Missing on pending investigations; necessary for production scale.
+- **Security:** The hosted endpoint currently lacks authentication and rate limiting, which is acceptable for a synthetic evaluation deployment but not for production.
+- **Automation Pipeline:** The `automationEligible` flag successfully identifies safe auto-retries, but the actual cron/event loop to execute them automatically was deliberately excluded to stay within the assignment scope.
