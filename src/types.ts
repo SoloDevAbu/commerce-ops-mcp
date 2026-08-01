@@ -58,13 +58,21 @@ export type AuditEntry = {
   performedAt: string;
 };
 
-export type RetryResult = {
-  success: boolean;
-  orderId: string;
-  message: string;
-  newStatus: string;
-  auditId: string;
-};
+export type RetryResult =
+  | {
+      confirmed: false;
+      orderId: string;
+      validationPassed: boolean;
+      message: string;
+    }
+  | {
+      confirmed: true;
+      success: boolean;
+      orderId: string;
+      message: string;
+      newStatus: string;
+      auditId: string;
+    };
 
 export type StatusUpdateResult =
   | {
@@ -102,5 +110,15 @@ export class InventoryUnavailableError extends Error {
   readonly code = "INVENTORY_UNAVAILABLE";
   constructor(orderId: string) {
     super(`Cannot fulfill order ${orderId}: inventory unavailable`);
+  }
+}
+
+export class ApprovalRequiredError extends Error {
+  readonly code = "APPROVAL_REQUIRED";
+  constructor() {
+    super(
+      "This operation requires explicit approval. " +
+        "Set confirmed=true after obtaining human confirmation.",
+    );
   }
 }

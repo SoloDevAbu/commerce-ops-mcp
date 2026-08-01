@@ -15,3 +15,24 @@ export const CHARACTER_LIMIT = 25_000;
 
 /** Default page size for list tools. */
 export const DEFAULT_PAGE_LIMIT = 20;
+
+/**
+ * Strict order status transition map.
+ * Terminal states (fulfilled, cancelled) have no outbound transitions.
+ * Enforced at the service boundary in updateOrderStatus().
+ */
+export const VALID_TRANSITIONS: Record<string, readonly string[]> = {
+  pending: ["processing", "cancelled"],
+  processing: ["stuck", "fulfilled", "cancelled"],
+  stuck: ["processing", "cancelled"],
+  fulfilled: [], // terminal
+  cancelled: [], // terminal
+};
+
+export const VALID_ORDER_STATUSES = [
+  "pending",
+  "processing",
+  "stuck",
+  "fulfilled",
+  "cancelled",
+] as const;

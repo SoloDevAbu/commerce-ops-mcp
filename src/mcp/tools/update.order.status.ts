@@ -3,13 +3,7 @@ import { z } from "zod";
 import { updateOrderStatus } from "../../services/recovery.service.js";
 import { formatMcpError } from "../../lib/errors.js";
 
-const VALID_ORDER_STATUSES = [
-  "pending",
-  "processing",
-  "stuck",
-  "fulfilled",
-  "cancelled",
-] as const;
+import { VALID_ORDER_STATUSES } from "../../constants.js";
 
 export function registerUpdateOrderStatusTool(server: McpServer): void {
   server.registerTool(
@@ -40,6 +34,7 @@ Args:
   - newStatus (string): Target status
   - reason (string): Reason for the update (written to audit log)
   - dryRun (boolean, default true): If true, only previews the change without executing it
+  - confirmed (boolean, default false): Must be true to execute when dryRun=false
 
 Returns: For dry_run=true - preview with impact and risk. For dry_run=false - confirmation with audit record ID.`,
 
@@ -64,6 +59,13 @@ Returns: For dry_run=true - preview with impact and risk. For dry_run=false - co
           .describe(
             "If true (default), returns a preview of the change without executing it. Set to false to actually apply the change.",
           ),
+        confirmed: z
+          .boolean()
+          .default(false)
+          .describe(
+            "Must be true to execute when dryRun=false. " +
+              "The AI client must obtain explicit human approval before setting this to true.",
+          ),
       },
 
       outputSchema: {
@@ -82,17 +84,18 @@ Returns: For dry_run=true - preview with impact and risk. For dry_run=false - co
       annotations: {
         readOnlyHint: false,
         destructiveHint: true,
-        idempotentHint: false,
+        idempotentHint: true,
         openWorldHint: false,
       },
     },
-    async ({ orderId, newStatus, reason, dryRun }) => {
+    async ({ orderId, newStatus, reason, dryRun, confirmed }) => {
       try {
         const result = await updateOrderStatus(
           orderId.trim().toUpperCase(),
           newStatus,
           reason,
           dryRun,
+          confirmed,
         );
 
         let text: string;

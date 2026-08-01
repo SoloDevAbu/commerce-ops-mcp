@@ -25,9 +25,23 @@ import {
   OrderNotFoundError,
   InvalidStateError,
   InventoryUnavailableError,
+  ApprovalRequiredError,
   type RetryResult,
   type StatusUpdateResult,
 } from "../types.js";
+import { VALID_TRANSITIONS, VALID_ORDER_STATUSES } from "../constants.js";
+
+/**
+ * Checks if an error is a PostgreSQL unique constraint violation (code 23505).
+ * Used to gracefully handle concurrent duplicate operations via idempotency keys.
+ */
+function isUniqueViolation(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    "code" in error &&
+    (error as { code: string }).code === "23505"
+  );
+}
 
 /**
  * Valid source statuses that permit a fulfillment retry.
@@ -41,10 +55,11 @@ const RETRYABLE_FULFILLMENT_STATUSES = new Set(["not_started", "failed"]);
 export async function retryFulfillmentProcessing(
   orderId: string,
   reason: string,
+  confirmed: boolean,
 ): Promise<RetryResult> {
   const now = new Date().toISOString();
 
-  // Step 1: Resolve human-readable orderId → internal UUID
+  // Step 1: Read order outside tx for early validation / preview mode
   const orderRows = await db
     .select()
     .from(orders)
@@ -53,7 +68,7 @@ export async function retryFulfillmentProcessing(
   const order = orderRows[0];
   if (!order) throw new OrderNotFoundError(orderId);
 
-  // Step 2: Fetch related records using UUID
+  // Step 2: Fetch related records for preview validation
   const internalId = order.id;
   const [paymentRows, fulfillmentRows] = await Promise.all([
     db.select().from(payments).where(eq(payments.orderId, internalId)),
@@ -101,54 +116,109 @@ export async function retryFulfillmentProcessing(
     throw new InventoryUnavailableError(orderId);
   }
 
-  // Execute recovery — all writes are wrapped in a single transaction so that
-  // a mid-flight crash leaves the database in a consistent state.
-  await db.transaction(async (tx) => {
-    if (ful) {
-      await tx
-        .update(fulfillment)
-        .set({
+  // Approval gate — server-side enforcement.
+  // All eligibility guards have already run, so this preview is accurate.
+  if (!confirmed) {
+    return {
+      confirmed: false,
+      orderId: order.orderId,
+      validationPassed: true,
+      message:
+        `Validation passed for ${order.orderId}. ` +
+        `Order is eligible for fulfillment retry. ` +
+        `Set confirmed=true to execute.`,
+    };
+  }
+
+  // Execute recovery inside a transaction with row lock to prevent concurrent mutations.
+  const idempotencyKey = `retry_fulfillment:${orderId}`;
+
+  try {
+    await db.transaction(async (tx) => {
+      // Re-read order with FOR UPDATE lock — prevents concurrent retries
+      const [lockedOrder] = await tx
+        .select()
+        .from(orders)
+        .where(eq(orders.orderId, orderId))
+        .for("update");
+
+      if (!lockedOrder) throw new OrderNotFoundError(orderId);
+
+      // Re-validate inside the lock — state may have changed since preview
+      if (!RETRYABLE_ORDER_STATUSES.has(lockedOrder.status)) {
+        throw new InvalidStateError(
+          `Order ${orderId} is no longer in a retryable state (current: "${lockedOrder.status}"). ` +
+            `Another operation may have already processed this order.`,
+        );
+      }
+
+      // Re-fetch fulfillment inside tx
+      const [lockedFul] = await tx
+        .select()
+        .from(fulfillment)
+        .where(eq(fulfillment.orderId, lockedOrder.id));
+
+      if (lockedFul) {
+        await tx
+          .update(fulfillment)
+          .set({
+            status: "processing",
+            failureReason: null,
+            startedAt: now,
+            updatedAt: now,
+          })
+          .where(eq(fulfillment.orderId, lockedOrder.id));
+      } else {
+        await tx.insert(fulfillment).values({
+          id: randomUUID(),
+          orderId: lockedOrder.id,
           status: "processing",
-          failureReason: null,
           startedAt: now,
           updatedAt: now,
-        })
-        .where(eq(fulfillment.orderId, internalId));
-    } else {
-      await tx.insert(fulfillment).values({
+        });
+      }
+
+      await tx
+        .update(orders)
+        .set({ status: "processing", updatedAt: now, stuckSince: null })
+        .where(eq(orders.id, lockedOrder.id));
+
+      await tx.insert(orderEvents).values({
         id: randomUUID(),
-        orderId: internalId,
-        status: "processing",
-        startedAt: now,
-        updatedAt: now,
+        orderId: lockedOrder.id,
+        eventType: "fulfillment_retried",
+        description: `Fulfillment retried by operations. Reason: ${reason}`,
+        createdAt: now,
       });
-    }
 
-    await tx
-      .update(orders)
-      .set({ status: "processing", updatedAt: now, stuckSince: null })
-      .where(eq(orders.id, internalId));
-
-    await tx.insert(orderEvents).values({
-      id: randomUUID(),
-      orderId: internalId,
-      eventType: "fulfillment_retried",
-      description: `Fulfillment retried by operations. Reason: ${reason}`,
-      createdAt: now,
+      await writeAudit(
+        {
+          orderId: lockedOrder.id,
+          action: "retry_fulfillment",
+          reason,
+          outcome: "Fulfillment restarted — status set to processing",
+          idempotencyKey,
+        },
+        tx,
+      );
     });
-
-    await writeAudit(
-      {
-        orderId: internalId,
-        action: "retry_fulfillment",
-        reason,
-        outcome: "Fulfillment restarted — status set to processing",
-      },
-      tx,
-    );
-  });
+  } catch (error: unknown) {
+    // Gracefully handle concurrent duplicate retries via idempotency key
+    if (isUniqueViolation(error)) {
+      return {
+        confirmed: true,
+        success: true,
+        orderId: order.orderId,
+        message: `Fulfillment retry for ${order.orderId} was already processed.`,
+        newStatus: "processing",
+        auditId: "(already recorded)",
+      };
+    }
+    throw error;
+  }
 
   return {
+    confirmed: true,
     success: true,
     orderId: order.orderId, // human-readable in response
     message:
@@ -160,18 +230,10 @@ export async function retryFulfillmentProcessing(
   };
 }
 
-const VALID_STATUSES = [
-  "pending",
-  "processing",
-  "stuck",
-  "fulfilled",
-  "cancelled",
-] as const;
-
-type ValidStatus = (typeof VALID_STATUSES)[number];
+type ValidStatus = (typeof VALID_ORDER_STATUSES)[number];
 
 function isValidStatus(s: string): s is ValidStatus {
-  return (VALID_STATUSES as readonly string[]).includes(s);
+  return (VALID_ORDER_STATUSES as readonly string[]).includes(s);
 }
 
 function assessRisk(
@@ -179,9 +241,7 @@ function assessRisk(
   newStatus: string,
 ): "low" | "medium" | "high" {
   if (newStatus === "cancelled") return "high";
-  if (currentStatus === "fulfilled") return "high";
-  if (newStatus === "fulfilled" && currentStatus !== "processing")
-    return "medium";
+  // Transition map blocks `fulfilled` from transitioning, and only allows `processing` -> `fulfilled`
   return "low";
 }
 
@@ -203,6 +263,7 @@ export async function updateOrderStatus(
   newStatus: string,
   reason: string,
   dryRun: boolean = true,
+  confirmed: boolean = false,
 ): Promise<StatusUpdateResult> {
   // Step 1: Resolve human-readable orderId → internal UUID
   const orderRows = await db
@@ -216,13 +277,24 @@ export async function updateOrderStatus(
   if (!isValidStatus(newStatus)) {
     throw new InvalidStateError(
       `"${newStatus}" is not a valid order status. ` +
-        `Valid statuses: ${VALID_STATUSES.join(", ")}.`,
+        `Valid statuses: ${VALID_ORDER_STATUSES.join(", ")}.`,
     );
   }
 
   if (order.status === newStatus) {
     throw new InvalidStateError(
       `Order ${orderId} is already in status "${newStatus}". No change needed.`,
+    );
+  }
+
+  // Enforce strict transition rules
+  const allowedNext = VALID_TRANSITIONS[order.status];
+  if (!allowedNext || !allowedNext.includes(newStatus)) {
+    throw new InvalidStateError(
+      `Cannot transition order ${orderId} from "${order.status}" to "${newStatus}". ` +
+        `Valid transitions from "${order.status}": ${
+          allowedNext?.length ? allowedNext.join(", ") : "none (terminal state)"
+        }.`,
     );
   }
 
@@ -241,39 +313,77 @@ export async function updateOrderStatus(
     };
   }
 
-  // Execute update — all writes are wrapped in a single transaction.
-  const internalId = order.id;
+  // Server-side approval gate — must be explicitly confirmed even when dryRun=false
+  if (!confirmed) {
+    throw new ApprovalRequiredError();
+  }
+
+  // Execute update inside a transaction with row lock to prevent concurrent mutations.
   const now = new Date().toISOString();
   const previousStatus = order.status;
+  const idempotencyKey = `update_status:${orderId}:${previousStatus}:${newStatus}`;
 
-  await db.transaction(async (tx) => {
-    await tx
-      .update(orders)
-      .set({
-        status: newStatus,
-        updatedAt: now,
-        stuckSince: newStatus === "stuck" ? now : null,
-      })
-      .where(eq(orders.id, internalId));
+  try {
+    await db.transaction(async (tx) => {
+      // Re-read with row lock — prevents concurrent updates
+      const [lockedOrder] = await tx
+        .select()
+        .from(orders)
+        .where(eq(orders.orderId, orderId))
+        .for("update");
 
-    await tx.insert(orderEvents).values({
-      id: randomUUID(),
-      orderId: internalId,
-      eventType: "status_updated",
-      description: `Status manually updated: "${previousStatus}" → "${newStatus}". Reason: ${reason}`,
-      createdAt: now,
+      if (!lockedOrder) throw new OrderNotFoundError(orderId);
+
+      // Re-validate — status may have changed since preview
+      if (lockedOrder.status !== previousStatus) {
+        throw new InvalidStateError(
+          `Order ${orderId} status changed to "${lockedOrder.status}" since preview. ` +
+            `Please re-run with dryRun=true to get an updated preview.`,
+        );
+      }
+
+      await tx
+        .update(orders)
+        .set({
+          status: newStatus,
+          updatedAt: now,
+          stuckSince: newStatus === "stuck" ? now : null,
+        })
+        .where(eq(orders.id, lockedOrder.id));
+
+      await tx.insert(orderEvents).values({
+        id: randomUUID(),
+        orderId: lockedOrder.id,
+        eventType: "status_updated",
+        description: `Status manually updated: "${previousStatus}" → "${newStatus}". Reason: ${reason}`,
+        createdAt: now,
+      });
+
+      await writeAudit(
+        {
+          orderId: lockedOrder.id,
+          action: "update_order_status",
+          reason,
+          outcome: `Status changed from "${previousStatus}" to "${newStatus}"`,
+          idempotencyKey,
+        },
+        tx,
+      );
     });
-
-    await writeAudit(
-      {
-        orderId: internalId,
-        action: "update_order_status",
-        reason,
-        outcome: `Status changed from "${previousStatus}" to "${newStatus}"`,
-      },
-      tx,
-    );
-  });
+  } catch (error: unknown) {
+    // Gracefully handle concurrent duplicate updates via idempotency key
+    if (isUniqueViolation(error)) {
+      return {
+        dryRun: false,
+        success: true,
+        orderId: order.orderId,
+        previousStatus,
+        newStatus,
+        auditId: "(already recorded)",
+      };
+    }
+    throw error;
+  }
 
   return {
     dryRun: false,

@@ -16,6 +16,7 @@ export async function writeAudit(
     action: string;
     reason: string;
     outcome: string;
+    idempotencyKey?: string;
   },
   tx?: Tx,
 ): Promise<void> {
@@ -27,5 +28,6 @@ export async function writeAudit(
     reason: params.reason,
     outcome: params.outcome,
     performedAt: new Date().toISOString(),
+    idempotencyKey: params.idempotencyKey ?? null,
   });
 }

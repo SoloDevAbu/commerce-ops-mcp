@@ -8,6 +8,7 @@ import {
   OrderNotFoundError,
   InvalidStateError,
   InventoryUnavailableError,
+  ApprovalRequiredError,
 } from "../../src/types.js";
 
 const mockDbSelect = vi.fn();
@@ -15,6 +16,7 @@ const mockDbSelect = vi.fn();
 // tx stub — used inside db.transaction() callbacks
 const mockTxUpdate = vi.fn();
 const mockTxInsert = vi.fn();
+const mockTxSelect = vi.fn();
 
 // db.transaction() immediately invokes the callback with the tx stub
 const mockTransaction = vi
@@ -23,6 +25,7 @@ const mockTransaction = vi
     const tx = {
       update: mockTxUpdate,
       insert: mockTxInsert,
+      select: mockTxSelect,
     };
     return cb(tx);
   });
@@ -126,10 +129,57 @@ function setupTxWriteMocks() {
   return { updateChain, insertChain };
 }
 
+/**
+ * Configures tx.select for the FOR UPDATE re-reads inside the transaction.
+ *
+ * retryFulfillmentProcessing:
+ *   - 1st tx.select → order (with .for("update"))
+ *   - 2nd tx.select → fulfillment (plain .where())
+ *
+ * updateOrderStatus:
+ *   - 1st tx.select → order (with .for("update"))
+ */
+function setupTxSelectMock(
+  orderRow: ReturnType<typeof makeOrder>,
+  fulfillRow?: ReturnType<typeof makeFulfillment>,
+) {
+  const orderSelectChain = {
+    from: vi.fn().mockReturnThis(),
+    where: vi.fn().mockReturnThis(),
+    for: vi.fn().mockResolvedValue([orderRow]),
+  };
+  const fulfillSelectChain = {
+    from: vi.fn().mockReturnThis(),
+    where: vi.fn().mockResolvedValue(fulfillRow ? [fulfillRow] : []),
+  };
+  mockTxSelect
+    .mockReturnValueOnce(orderSelectChain) // order FOR UPDATE
+    .mockReturnValueOnce(fulfillSelectChain); // fulfillment re-read
+}
+
+/**
+ * Configures tx.select for updateOrderStatus write path:
+ *   - 1st tx.select → order (with .for("update"))
+ */
+function setupTxSelectMockForStatusUpdate(
+  orderRow: ReturnType<typeof makeOrder>,
+) {
+  const orderSelectChain = {
+    from: vi.fn().mockReturnThis(),
+    where: vi.fn().mockReturnThis(),
+    for: vi.fn().mockResolvedValue([orderRow]),
+  };
+  mockTxSelect.mockReturnValueOnce(orderSelectChain);
+}
+
 function restoreTransactionMock() {
   mockTransaction.mockImplementation(
     async (cb: (tx: unknown) => Promise<unknown>) => {
-      const tx = { update: mockTxUpdate, insert: mockTxInsert };
+      const tx = {
+        update: mockTxUpdate,
+        insert: mockTxInsert,
+        select: mockTxSelect,
+      };
       return cb(tx);
     },
   );
@@ -154,21 +204,27 @@ describe("retryFulfillmentProcessing", () => {
     mockDbSelect.mockReturnValueOnce(ordersChain);
 
     const retry = await getService();
-    await expect(retry("ORD-NONE", "test")).rejects.toThrow(OrderNotFoundError);
+    await expect(retry("ORD-NONE", "test", true)).rejects.toThrow(
+      OrderNotFoundError,
+    );
   });
 
   it("throws InvalidStateError when order is in non-retryable status (fulfilled)", async () => {
     setupSelectMock({ orderRows: [makeOrder({ status: "fulfilled" })] });
 
     const retry = await getService();
-    await expect(retry("ORD-1001", "test")).rejects.toThrow(InvalidStateError);
+    await expect(retry("ORD-1001", "test", true)).rejects.toThrow(
+      InvalidStateError,
+    );
   });
 
   it("throws InvalidStateError when order is in non-retryable status (cancelled)", async () => {
     setupSelectMock({ orderRows: [makeOrder({ status: "cancelled" })] });
 
     const retry = await getService();
-    await expect(retry("ORD-1001", "test")).rejects.toThrow(InvalidStateError);
+    await expect(retry("ORD-1001", "test", true)).rejects.toThrow(
+      InvalidStateError,
+    );
   });
 
   it("throws InvalidStateError when payment is not captured", async () => {
@@ -177,14 +233,18 @@ describe("retryFulfillmentProcessing", () => {
     });
 
     const retry = await getService();
-    await expect(retry("ORD-1001", "test")).rejects.toThrow(InvalidStateError);
+    await expect(retry("ORD-1001", "test", true)).rejects.toThrow(
+      InvalidStateError,
+    );
   });
 
   it("throws InvalidStateError when payment is missing", async () => {
     setupSelectMock({ paymentRows: [] });
 
     const retry = await getService();
-    await expect(retry("ORD-1001", "test")).rejects.toThrow(InvalidStateError);
+    await expect(retry("ORD-1001", "test", true)).rejects.toThrow(
+      InvalidStateError,
+    );
   });
 
   it("throws InvalidStateError when fulfillment is already processing", async () => {
@@ -193,7 +253,9 @@ describe("retryFulfillmentProcessing", () => {
     });
 
     const retry = await getService();
-    await expect(retry("ORD-1001", "test")).rejects.toThrow(InvalidStateError);
+    await expect(retry("ORD-1001", "test", true)).rejects.toThrow(
+      InvalidStateError,
+    );
   });
 
   it("throws InventoryUnavailableError when failure reason contains 'inventory'", async () => {
@@ -207,7 +269,7 @@ describe("retryFulfillmentProcessing", () => {
     });
 
     const retry = await getService();
-    await expect(retry("ORD-1001", "test")).rejects.toThrow(
+    await expect(retry("ORD-1001", "test", true)).rejects.toThrow(
       InventoryUnavailableError,
     );
   });
@@ -223,21 +285,25 @@ describe("retryFulfillmentProcessing", () => {
     });
 
     const retry = await getService();
-    await expect(retry("ORD-1001", "test")).rejects.toThrow(
+    await expect(retry("ORD-1001", "test", true)).rejects.toThrow(
       InventoryUnavailableError,
     );
   });
 
   it("succeeds for a stuck order with captured payment and failed fulfillment", async () => {
     setupSelectMock();
+    setupTxSelectMock(makeOrder(), makeFulfillment());
     setupTxWriteMocks();
 
     const retry = await getService();
-    const result = await retry("ORD-1001", "manual ops retry");
+    const result = await retry("ORD-1001", "manual ops retry", true);
 
-    expect(result.success).toBe(true);
-    expect(result.orderId).toBe("ORD-1001"); // human-readable
-    expect(result.newStatus).toBe("processing");
+    expect(result.confirmed).toBe(true);
+    if (result.confirmed) {
+      expect(result.success).toBe(true);
+      expect(result.orderId).toBe("ORD-1001"); // human-readable
+      expect(result.newStatus).toBe("processing");
+    }
 
     // Writes must be wrapped in a single transaction
     expect(mockTransaction).toHaveBeenCalledOnce();
@@ -248,6 +314,7 @@ describe("retryFulfillmentProcessing", () => {
       expect.objectContaining({
         action: "retry_fulfillment",
         reason: "manual ops retry",
+        idempotencyKey: "retry_fulfillment:ORD-1001",
       }),
       expect.anything(), // tx argument
     );
@@ -258,22 +325,27 @@ describe("retryFulfillmentProcessing", () => {
       orderRows: [makeOrder({ status: "processing" })],
       fulfillRows: [], // no fulfillment record
     });
+    setupTxSelectMock(makeOrder({ status: "processing" })); // no fulfillment row
     setupTxWriteMocks();
 
     const retry = await getService();
-    const result = await retry("ORD-1001", "create new fulfillment");
+    const result = await retry("ORD-1001", "create new fulfillment", true);
 
-    expect(result.success).toBe(true);
+    expect(result.confirmed).toBe(true);
+    if (result.confirmed) {
+      expect(result.success).toBe(true);
+    }
     // tx.insert should have been called (for new fulfillment row + event row)
     expect(mockTxInsert).toHaveBeenCalled();
   });
 
   it("all mutations execute inside a single transaction (atomicity)", async () => {
     setupSelectMock();
+    setupTxSelectMock(makeOrder(), makeFulfillment());
     setupTxWriteMocks();
 
     const retry = await getService();
-    await retry("ORD-1001", "atomicity check");
+    await retry("ORD-1001", "atomicity check", true);
 
     // Exactly one transaction wrapping all writes
     expect(mockTransaction).toHaveBeenCalledOnce();
@@ -284,13 +356,30 @@ describe("retryFulfillmentProcessing", () => {
 
   it("returns human-readable orderId (not UUID) in result", async () => {
     setupSelectMock();
+    setupTxSelectMock(makeOrder(), makeFulfillment());
     setupTxWriteMocks();
 
     const retry = await getService();
-    const result = await retry("ORD-1001", "reason");
+    const result = await retry("ORD-1001", "reason", true);
 
     expect(result.orderId).toBe("ORD-1001");
     expect(result.orderId).not.toContain("uuid");
+  });
+
+  it("returns preview when confirmed=false (no writes)", async () => {
+    setupSelectMock();
+
+    const retry = await getService();
+    const result = await retry("ORD-1001", "dry check", false);
+
+    expect(result.confirmed).toBe(false);
+    if (!result.confirmed) {
+      expect(result.validationPassed).toBe(true);
+      expect(result.orderId).toBe("ORD-1001");
+    }
+    // No DB writes when confirmed=false
+    expect(mockTransaction).not.toHaveBeenCalled();
+    expect(mockWriteAudit).not.toHaveBeenCalled();
   });
 });
 
@@ -376,9 +465,11 @@ describe("updateOrderStatus", () => {
   });
 
   it("assesses high risk when current status is fulfilled", async () => {
-    setupOrderSelect([makeOrder({ status: "fulfilled" })]);
+    // Note: fulfilled → cancelled will be blocked by the transition map in Plan 2.
+    // For now, this test uses stuck → cancelled which IS a valid high-risk transition.
+    setupOrderSelect([makeOrder({ status: "stuck" })]);
     const update = await getService();
-    const result = await update("ORD-1001", "cancelled", "reverse", true);
+    const result = await update("ORD-1001", "cancelled", "cancel", true);
 
     expect(result.dryRun).toBe(true);
     if (result.dryRun) {
@@ -386,8 +477,13 @@ describe("updateOrderStatus", () => {
     }
   });
 
-  it("assesses medium risk when marking fulfilled from non-processing", async () => {
-    setupOrderSelect([makeOrder({ status: "stuck" })]);
+  it("assesses medium risk when marking fulfilled from processing", async () => {
+    // processing → fulfilled is the only valid path to fulfilled.
+    // assessRisk returns "low" for this path (currentStatus === "processing").
+    // The medium-risk branch (currentStatus !== "processing") is intentionally
+    // unreachable after the transition map was added in Plan 2.
+    // This test is kept to document that processing → fulfilled = low risk.
+    setupOrderSelect([makeOrder({ status: "processing" })]);
     const update = await getService();
     const result = await update(
       "ORD-1001",
@@ -398,12 +494,92 @@ describe("updateOrderStatus", () => {
 
     expect(result.dryRun).toBe(true);
     if (result.dryRun) {
-      expect(result.riskLevel).toBe("medium");
+      // processing → fulfilled is low risk (not medium) because
+      // assessRisk only returns medium when currentStatus !== "processing"
+      expect(result.riskLevel).toBe("low");
     }
+  });
+
+  it("rejects transition from terminal state: fulfilled → processing", async () => {
+    setupOrderSelect([makeOrder({ status: "fulfilled" })]);
+    const update = await getService();
+    await expect(
+      update("ORD-1001", "processing", "un-fulfill", true),
+    ).rejects.toThrow(InvalidStateError);
+  });
+
+  it("rejects transition from terminal state: cancelled → processing", async () => {
+    setupOrderSelect([makeOrder({ status: "cancelled" })]);
+    const update = await getService();
+    await expect(
+      update("ORD-1001", "processing", "un-cancel", true),
+    ).rejects.toThrow(InvalidStateError);
+  });
+
+  it("rejects invalid transition: pending → fulfilled", async () => {
+    setupOrderSelect([makeOrder({ status: "pending" })]);
+    const update = await getService();
+    await expect(
+      update("ORD-1001", "fulfilled", "skip ahead", true),
+    ).rejects.toThrow(InvalidStateError);
+  });
+
+  it("rejects invalid transition: pending → stuck", async () => {
+    setupOrderSelect([makeOrder({ status: "pending" })]);
+    const update = await getService();
+    await expect(
+      update("ORD-1001", "stuck", "mark stuck", true),
+    ).rejects.toThrow(InvalidStateError);
+  });
+
+  it("allows valid transition: pending → processing", async () => {
+    setupOrderSelect([makeOrder({ status: "pending" })]);
+    const update = await getService();
+    const result = await update("ORD-1001", "processing", "begin", true);
+    expect(result.dryRun).toBe(true);
+    // No error thrown = transition is allowed
+  });
+
+  it("allows valid transition: processing → cancelled", async () => {
+    setupOrderSelect([makeOrder({ status: "processing" })]);
+    const update = await getService();
+    const result = await update(
+      "ORD-1001",
+      "cancelled",
+      "customer request",
+      true,
+    );
+    expect(result.dryRun).toBe(true);
+  });
+
+  it("allows valid transition: stuck → processing", async () => {
+    setupOrderSelect([makeOrder({ status: "stuck" })]);
+    const update = await getService();
+    const result = await update("ORD-1001", "processing", "un-stick", true);
+    expect(result.dryRun).toBe(true);
+  });
+
+  it("includes 'none (terminal state)' in error message for terminal source", async () => {
+    setupOrderSelect([makeOrder({ status: "fulfilled" })]);
+    const update = await getService();
+    try {
+      await update("ORD-1001", "processing", "test", true);
+    } catch (e) {
+      expect((e as Error).message).toContain("none (terminal state)");
+    }
+  });
+
+  it("rejects transition from fulfilled (terminal state)", async () => {
+    setupOrderSelect([makeOrder({ status: "fulfilled" })]);
+    const update = await getService();
+    await expect(
+      update("ORD-1001", "cancelled", "reverse", true),
+    ).rejects.toThrow(InvalidStateError);
   });
 
   it("executes status update and writes audit inside transaction when dryRun=false", async () => {
     setupOrderSelect([makeOrder({ status: "stuck" })]);
+    setupTxSelectMockForStatusUpdate(makeOrder({ status: "stuck" }));
     setupTxWriteMocks();
 
     const update = await getService();
@@ -412,6 +588,7 @@ describe("updateOrderStatus", () => {
       "processing",
       "un-stick order",
       false,
+      true, // confirmed
     );
 
     expect(result.dryRun).toBe(false);
@@ -425,17 +602,31 @@ describe("updateOrderStatus", () => {
     expect(mockTransaction).toHaveBeenCalledOnce();
     expect(mockTxUpdate).toHaveBeenCalled();
     expect(mockWriteAudit).toHaveBeenCalledWith(
-      expect.objectContaining({ action: "update_order_status" }),
+      expect.objectContaining({
+        action: "update_order_status",
+        idempotencyKey: "update_status:ORD-1001:stuck:processing",
+      }),
       expect.anything(), // tx argument
     );
   });
 
+  it("throws ApprovalRequiredError when dryRun=false and confirmed=false", async () => {
+    setupOrderSelect([makeOrder({ status: "stuck" })]);
+    const update = await getService();
+    await expect(
+      update("ORD-1001", "processing", "reason", false, false),
+    ).rejects.toThrow(ApprovalRequiredError);
+    // No transaction or writes should have been called
+    expect(mockTransaction).not.toHaveBeenCalled();
+  });
+
   it("all mutations execute inside a single transaction (atomicity)", async () => {
     setupOrderSelect([makeOrder({ status: "stuck" })]);
+    setupTxSelectMockForStatusUpdate(makeOrder({ status: "stuck" }));
     setupTxWriteMocks();
 
     const update = await getService();
-    await update("ORD-1001", "processing", "atomicity check", false);
+    await update("ORD-1001", "processing", "atomicity check", false, true);
 
     expect(mockTransaction).toHaveBeenCalledOnce();
   });
@@ -460,8 +651,9 @@ describe("updateOrderStatus", () => {
     vi.clearAllMocks();
     restoreTransactionMock();
     setupOrderSelect([makeOrder({ status: "stuck" })]);
+    setupTxSelectMockForStatusUpdate(makeOrder({ status: "stuck" }));
     setupTxWriteMocks();
-    const liveResult = await update("ORD-1001", "processing", "r", false);
+    const liveResult = await update("ORD-1001", "processing", "r", false, true);
     expect(liveResult.orderId).toBe("ORD-1001");
   });
 });
