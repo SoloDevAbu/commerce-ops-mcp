@@ -1,9 +1,5 @@
 import { pgTable, text, doublePrecision, uuid } from "drizzle-orm/pg-core";
 
-// Order status flow:
-// pending => processing => fulfilled | cancelled
-// Any order in processing > 4 hours is considered stuck
-
 export const orders = pgTable("orders", {
   id: uuid("id").primaryKey().defaultRandom(),
   orderId: text("order_id").notNull().unique(),

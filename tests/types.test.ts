@@ -9,7 +9,25 @@ import {
   OrderNotFoundError,
   InvalidStateError,
   InventoryUnavailableError,
+  ApprovalRequiredError,
 } from "../src/types.js";
+
+describe("ApprovalRequiredError", () => {
+  it("is an instance of Error", () => {
+    const err = new ApprovalRequiredError();
+    expect(err).toBeInstanceOf(Error);
+  });
+
+  it("has the correct error code", () => {
+    const err = new ApprovalRequiredError();
+    expect(err.code).toBe("APPROVAL_REQUIRED");
+  });
+
+  it("includes instructions in the message", () => {
+    const err = new ApprovalRequiredError();
+    expect(err.message).toContain("confirmed=true");
+  });
+});
 
 describe("OrderNotFoundError", () => {
   it("is an instance of Error", () => {

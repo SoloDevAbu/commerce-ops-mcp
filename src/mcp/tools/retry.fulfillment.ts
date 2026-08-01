@@ -29,8 +29,9 @@ Do NOT use this tool when:
 Args:
   - orderId (string): The order to retry (e.g., "ORD-1047")
   - reason (string): Human-readable reason for the retry (written to audit log)
+  - confirmed (boolean, default false): Must be true to execute.
 
-Returns: Result object with success status, new order status, and audit record ID.`,
+Returns: When confirmed=false, returns a validation preview. When confirmed=true, returns success status, new order status, and audit record ID.`,
 
       inputSchema: {
         orderId: z
@@ -67,7 +68,7 @@ Returns: Result object with success status, new order status, and audit record I
       annotations: {
         readOnlyHint: false,
         destructiveHint: false,
-        idempotentHint: false,
+        idempotentHint: true,
         openWorldHint: false,
       },
     },

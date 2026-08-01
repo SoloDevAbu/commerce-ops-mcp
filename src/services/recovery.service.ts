@@ -29,7 +29,7 @@ import {
   type RetryResult,
   type StatusUpdateResult,
 } from "../types.js";
-import { VALID_TRANSITIONS } from "../constants.js";
+import { VALID_TRANSITIONS, VALID_ORDER_STATUSES } from "../constants.js";
 
 /**
  * Checks if an error is a PostgreSQL unique constraint violation (code 23505).
@@ -230,18 +230,10 @@ export async function retryFulfillmentProcessing(
   };
 }
 
-const VALID_STATUSES = [
-  "pending",
-  "processing",
-  "stuck",
-  "fulfilled",
-  "cancelled",
-] as const;
-
-type ValidStatus = (typeof VALID_STATUSES)[number];
+type ValidStatus = (typeof VALID_ORDER_STATUSES)[number];
 
 function isValidStatus(s: string): s is ValidStatus {
-  return (VALID_STATUSES as readonly string[]).includes(s);
+  return (VALID_ORDER_STATUSES as readonly string[]).includes(s);
 }
 
 function assessRisk(
@@ -249,9 +241,7 @@ function assessRisk(
   newStatus: string,
 ): "low" | "medium" | "high" {
   if (newStatus === "cancelled") return "high";
-  if (currentStatus === "fulfilled") return "high";
-  if (newStatus === "fulfilled" && currentStatus !== "processing")
-    return "medium";
+  // Transition map blocks `fulfilled` from transitioning, and only allows `processing` -> `fulfilled`
   return "low";
 }
 
@@ -287,7 +277,7 @@ export async function updateOrderStatus(
   if (!isValidStatus(newStatus)) {
     throw new InvalidStateError(
       `"${newStatus}" is not a valid order status. ` +
-        `Valid statuses: ${VALID_STATUSES.join(", ")}.`,
+        `Valid statuses: ${VALID_ORDER_STATUSES.join(", ")}.`,
     );
   }
 

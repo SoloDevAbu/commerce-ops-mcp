@@ -28,3 +28,11 @@ export const VALID_TRANSITIONS: Record<string, readonly string[]> = {
   fulfilled: [], // terminal
   cancelled: [], // terminal
 };
+
+export const VALID_ORDER_STATUSES = [
+  "pending",
+  "processing",
+  "stuck",
+  "fulfilled",
+  "cancelled",
+] as const;
