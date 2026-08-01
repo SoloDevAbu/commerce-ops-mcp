@@ -62,4 +62,5 @@ export const auditLog = pgTable("audit_log", {
   reason: text("reason").notNull(),
   outcome: text("outcome").notNull(),
   performedAt: text("performed_at").notNull(),
+  idempotencyKey: text("idempotency_key").unique(),
 });

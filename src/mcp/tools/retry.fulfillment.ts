@@ -44,14 +44,24 @@ Returns: Result object with success status, new order status, and audit record I
           .describe(
             "Reason for retrying fulfillment. This is recorded in the audit log.",
           ),
+        confirmed: z
+          .boolean()
+          .default(false)
+          .describe(
+            "Must be true to execute. When false (default), returns a validation preview " +
+              "without making any changes. The AI client must obtain explicit human approval " +
+              "before setting this to true.",
+          ),
       },
 
       outputSchema: {
-        success: z.boolean(),
+        confirmed: z.boolean(),
+        success: z.boolean().optional(),
         orderId: z.string(),
         message: z.string(),
-        newStatus: z.string(),
-        auditId: z.string(),
+        validationPassed: z.boolean().optional(),
+        newStatus: z.string().optional(),
+        auditId: z.string().optional(),
       },
 
       annotations: {
@@ -61,18 +71,28 @@ Returns: Result object with success status, new order status, and audit record I
         openWorldHint: false,
       },
     },
-    async ({ orderId, reason }) => {
+    async ({ orderId, reason, confirmed }) => {
       try {
         const result = await retryFulfillmentProcessing(
           orderId.trim().toUpperCase(),
           reason,
+          confirmed,
         );
-        const text = result.success
-          ? `Fulfillment retry successful for ${result.orderId}.\n\n` +
+
+        let text: string;
+        if (!result.confirmed) {
+          text =
+            `PREVIEW (no changes made):\n\n` +
             `${result.message}\n\n` +
-            `New order status: ${result.newStatus}\n` +
-            `Audit record: ${result.auditId}`
-          : `Fulfillment retry failed for ${result.orderId}: ${result.message}`;
+            `To execute, call this tool again with confirmed=true.`;
+        } else {
+          text = result.success
+            ? `Fulfillment retry successful for ${result.orderId}.\n\n` +
+              `${result.message}\n\n` +
+              `New order status: ${result.newStatus}\n` +
+              `Audit record: ${result.auditId}`
+            : `Fulfillment retry failed for ${result.orderId}: ${result.message}`;
+        }
 
         return {
           content: [{ type: "text", text }],

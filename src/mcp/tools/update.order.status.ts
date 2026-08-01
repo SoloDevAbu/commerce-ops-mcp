@@ -64,6 +64,13 @@ Returns: For dry_run=true - preview with impact and risk. For dry_run=false - co
           .describe(
             "If true (default), returns a preview of the change without executing it. Set to false to actually apply the change.",
           ),
+        confirmed: z
+          .boolean()
+          .default(false)
+          .describe(
+            "Must be true to execute when dryRun=false. " +
+              "The AI client must obtain explicit human approval before setting this to true.",
+          ),
       },
 
       outputSchema: {
@@ -86,13 +93,14 @@ Returns: For dry_run=true - preview with impact and risk. For dry_run=false - co
         openWorldHint: false,
       },
     },
-    async ({ orderId, newStatus, reason, dryRun }) => {
+    async ({ orderId, newStatus, reason, dryRun, confirmed }) => {
       try {
         const result = await updateOrderStatus(
           orderId.trim().toUpperCase(),
           newStatus,
           reason,
           dryRun,
+          confirmed,
         );
 
         let text: string;

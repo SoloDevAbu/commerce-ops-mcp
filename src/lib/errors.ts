@@ -2,15 +2,28 @@ import {
   OrderNotFoundError,
   InvalidStateError,
   InventoryUnavailableError,
+  ApprovalRequiredError,
 } from "../types.js";
 
-export { OrderNotFoundError, InvalidStateError, InventoryUnavailableError };
+export {
+  OrderNotFoundError,
+  InvalidStateError,
+  InventoryUnavailableError,
+  ApprovalRequiredError,
+};
 
 /**
  * Converts any caught error into a human-readable MCP error string.
  * Provides actionable suggestions so the AI can guide the operator.
  */
 export function formatMcpError(error: unknown): string {
+  if (error instanceof ApprovalRequiredError) {
+    return (
+      `Approval required: ${error.message} ` +
+      `Present the operation details to the operator and set confirmed=true after they approve.`
+    );
+  }
+
   if (error instanceof OrderNotFoundError) {
     return (
       `Order not found: ${error.message}. ` +

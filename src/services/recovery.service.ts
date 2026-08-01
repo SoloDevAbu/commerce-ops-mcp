@@ -25,6 +25,7 @@ import {
   OrderNotFoundError,
   InvalidStateError,
   InventoryUnavailableError,
+  ApprovalRequiredError,
   type RetryResult,
   type StatusUpdateResult,
 } from "../types.js";
@@ -41,6 +42,7 @@ const RETRYABLE_FULFILLMENT_STATUSES = new Set(["not_started", "failed"]);
 export async function retryFulfillmentProcessing(
   orderId: string,
   reason: string,
+  confirmed: boolean,
 ): Promise<RetryResult> {
   const now = new Date().toISOString();
 
@@ -101,6 +103,20 @@ export async function retryFulfillmentProcessing(
     throw new InventoryUnavailableError(orderId);
   }
 
+  // Approval gate — server-side enforcement.
+  // All eligibility guards have already run, so this preview is accurate.
+  if (!confirmed) {
+    return {
+      confirmed: false,
+      orderId: order.orderId,
+      validationPassed: true,
+      message:
+        `Validation passed for ${order.orderId}. ` +
+        `Order is eligible for fulfillment retry. ` +
+        `Set confirmed=true to execute.`,
+    };
+  }
+
   // Execute recovery — all writes are wrapped in a single transaction so that
   // a mid-flight crash leaves the database in a consistent state.
   await db.transaction(async (tx) => {
@@ -149,6 +165,7 @@ export async function retryFulfillmentProcessing(
   });
 
   return {
+    confirmed: true,
     success: true,
     orderId: order.orderId, // human-readable in response
     message:
@@ -203,6 +220,7 @@ export async function updateOrderStatus(
   newStatus: string,
   reason: string,
   dryRun: boolean = true,
+  confirmed: boolean = false,
 ): Promise<StatusUpdateResult> {
   // Step 1: Resolve human-readable orderId → internal UUID
   const orderRows = await db
@@ -239,6 +257,11 @@ export async function updateOrderStatus(
       impact,
       riskLevel,
     };
+  }
+
+  // Server-side approval gate — must be explicitly confirmed even when dryRun=false
+  if (!confirmed) {
+    throw new ApprovalRequiredError();
   }
 
   // Execute update — all writes are wrapped in a single transaction.
