@@ -173,30 +173,36 @@ Retry fulfillment processing. The payment and inventory state are valid.
 
 Claude explains the finding and asks the operator to confirm the retry.
 
-On approval, Claude calls:
+On approval, Claude calls the tool with `confirmed=true`. The server validates eligibility and, because `confirmed=true` is set, executes inside a transaction:
 
 ```
-commerce_retry_fulfillment_processing("ORD-1002", "Fulfillment pipeline missed order after payment capture")
+commerce_retry_fulfillment_processing(
+  orderId  = "ORD-1002",
+  reason   = "Fulfillment pipeline missed order after payment capture",
+  confirmed = true
+)
 ```
 
-The action is recorded in the audit log and the outcome is reported back.
+The action is applied, one row is written to the audit log via `writeAudit()`, and the outcome (new status, audit record ID) is reported back. If `confirmed` is omitted or `false`, the server returns a validation preview and writes nothing.
 
 ---
 
 ## Available Scripts
 
-| Script            | Description                                     |
-| ----------------- | ----------------------------------------------- |
-| `pnpm install`    | Install all dependencies                        |
-| `pnpm build`      | Compile TypeScript to `dist/`                   |
-| `pnpm dev`        | Run in watch mode via stdio (local development) |
-| `pnpm dev:http`   | Run in watch mode via HTTP transport            |
-| `pnpm start`      | Start the compiled server via stdio             |
-| `pnpm start:http` | Start the compiled server via HTTP              |
-| `pnpm seed`       | Populate the database with 10 synthetic orders  |
-| `pnpm db:push`    | Push Drizzle schema to the database             |
-| `pnpm db:setup`   | Push schema + seed in one step                  |
-| `pnpm test`       | Run the test suite                              |
+| Script                 | Description                                                          |
+| ---------------------- | -------------------------------------------------------------------- |
+| `pnpm install`         | Install all dependencies                                             |
+| `pnpm build`           | Compile TypeScript to `dist/`                                        |
+| `pnpm dev`             | Run in watch mode via stdio (local development)                      |
+| `pnpm dev:http`        | Run in watch mode via HTTP transport                                 |
+| `pnpm start`           | Start the compiled server via stdio                                  |
+| `pnpm start:http`      | Start the compiled server via HTTP                                   |
+| `pnpm seed`            | Populate the database with 10 synthetic orders                       |
+| `pnpm db:push`         | Push Drizzle schema to the database                                  |
+| `pnpm db:setup`        | Push schema + seed in one step                                       |
+| `pnpm test`            | Run the unit test suite (service-layer, no DB required)              |
+| `pnpm test:integration`| Run PostgreSQL-backed integration tests (requires `DATABASE_URL`)    |
+| `pnpm test:smoke`      | Run hosted MCP smoke check over Streamable HTTP (requires a running server) |
 
 ---
 

@@ -125,19 +125,51 @@ than feature or ML sophistication.
 
 - **Read-only tools** (`commerce_investigate_order`, `commerce_list_pending_investigations`,
   `commerce_get_operations_summary`) run freely -- they cannot change state.
+
 - **Write tools** (`commerce_retry_fulfillment_processing`, `commerce_update_order_status`)
-  have their approval requirement stated directly in the MCP tool
-  description, which is what tells an AI client to ask the operator
-  before calling them. The MCP does not implement its own approval gate --
-  that's deliberately a conversation-layer concern, not a server one, so
-  the same safety expectation holds regardless of which AI client
-  connects.
-- Every write, success or failure, writes exactly one row to an audit log
-  through a single `writeAudit()` function -- centralized so no future
-  write path can accidentally skip it.
-- `commerce_retry_fulfillment_processing` is idempotent: calling it on an order
-  that already shipped or delivered is a safe no-op, not a duplicate
-  dispatch.
+  enforce approval **server-side at the mutation boundary**, not only through
+  client instructions:
+  - `commerce_retry_fulfillment_processing` requires `confirmed=true`. When called
+    with `confirmed=false` (the default), it runs all eligibility guards and returns
+    a validation preview -- no rows are touched. The mutation path only executes when
+    `confirmed=true` is explicitly set by the caller.
+  - `commerce_update_order_status` requires `dryRun=false` **and** `confirmed=true`.
+    `dryRun=true` (the default) returns a preview showing current status, proposed
+    status, impact, and risk level. When `dryRun=false` but `confirmed` is still
+    `false`, the server throws `ApprovalRequiredError` and writes nothing. This
+    guarantee holds regardless of which AI client connects to the server.
+
+- **Idempotency** on write tools is enforced at the database layer, not just
+  through input validation:
+  - Every write operation generates a deterministic `idempotencyKey`
+    (e.g. `retry_fulfillment:ORD-1002`, `update_status:ORD-1002:stuck:processing`)
+    and writes it to a unique-constrained column in `audit_log`.
+  - If two concurrent calls pass all eligibility guards and both reach the
+    `INSERT` into `audit_log`, the second will produce a PostgreSQL unique
+    constraint violation (error code `23505`). The service catches this and
+    returns the same success shape — so the caller gets a clean result,
+    and the database contains exactly one audit row per logical operation.
+  - Inside every transaction the order row is re-read with a `FOR UPDATE` row
+    lock, preventing a second concurrent call from proceeding past the lock
+    until the first transaction commits.
+
+- **State-transition enforcement**: `commerce_update_order_status` validates the
+  requested transition against a strict `VALID_TRANSITIONS` map before touching
+  any row. Terminal states (`fulfilled`, `cancelled`) have no outbound edges --
+  no call can move an order out of a terminal state. The allowed transitions are:
+
+  | From        | To (allowed)                          |
+  | ----------- | ------------------------------------- |
+  | `pending`   | `processing`, `cancelled`             |
+  | `processing`| `stuck`, `fulfilled`, `cancelled`     |
+  | `stuck`     | `processing`, `cancelled`             |
+  | `fulfilled` | *(terminal — no transitions)*         |
+  | `cancelled` | *(terminal — no transitions)*         |
+
+- Every write, whether it succeeds or is rejected after guards pass, appends
+  exactly one row to `audit_log` through the single `writeAudit()` function --
+  centralized so no future write path can accidentally skip it.
+
 - Every `commerce_investigate_order` report includes `automationEligible`, flagging
   which fixes would be safe to auto-retry in a future iteration --
   without actually building that auto-retry path now. This is a

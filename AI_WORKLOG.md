@@ -100,15 +100,52 @@ API is the same across both.
 - **Unit tests (Vitest)** against the service layer directly,
   covering every branch of the diagnosis rule engine (payment/provider
   mismatch, fulfillment failure with and without an inventory cause, the
-  stuck-in-processing timeout, and the clean happy path). This verifies business logic correctness
-  independent of whether the MCP transport is working.
+  stuck-in-processing timeout, and the clean happy path). These tests use
+  in-memory mocks and do not require a database. Run with `pnpm test`.
+
+- **PostgreSQL-backed integration tests** (`tests/integration/recovery.integration.test.ts`)
+  against a real Neon Postgres instance with no mocking. Each test seeds its own
+  isolated rows via `seedTestOrder()` and truncates all tables in `beforeEach`.
+  The suite covers:
+  - Mutation side effects (order status, fulfillment record, order events, audit row
+    all updated atomically in a single transaction).
+  - Approval enforcement (`confirmed=false` returns a preview and writes zero rows;
+    `dryRun=false + confirmed=false` throws `ApprovalRequiredError`).
+  - Idempotency on duplicate retries (second call on an already-retried order is
+    rejected via `InvalidStateError` once the order leaves a retryable state).
+  - Concurrent retries (`Promise.allSettled` fires two calls simultaneously;
+    `FOR UPDATE` row locking and the unique constraint on `idempotencyKey` ensure
+    exactly one audit row is written).
+  - Valid and invalid state transitions (all allowed edges and all blocked edges
+    against `VALID_TRANSITIONS`, including terminal states).
+  - Audit trail integrity (action, reason, outcome, idempotencyKey, and
+    performedAt are all verified field-by-field).
+  Run with: `pnpm test:integration` (requires `DATABASE_URL` to be set).
+
+- **Hosted MCP smoke check** (`tests/smoke/mcp-hosted.test.ts`) over Streamable
+  HTTP using the official `@modelcontextprotocol/sdk` TypeScript client. The
+  suite:
+  - Initializes a real MCP client session against the hosted endpoint via
+    `StreamableHTTPClientTransport`.
+  - Calls `client.listTools()` and asserts all 5 registered tool names are
+    present.
+  - Calls `commerce_get_operations_summary`, `commerce_investigate_order`, and
+    `commerce_list_pending_investigations` end-to-end and asserts the responses
+    are non-error and contain expected content.
+  This validates the transport wiring, CORS config, and Neon connection all
+  work correctly together in the deployed environment.
+  Run with: `pnpm test:smoke` (defaults to `http://localhost:3000/mcp`;
+  override with `MCP_HOSTED_URL=<url> pnpm test:smoke`).
+
 - **Claude Desktop over stdio** against the same codebase, to confirm the
   tools behave correctly through an actual MCP client, not just through
   direct function calls in tests.
+
 - **Claude web against the hosted Streamable HTTP endpoint**, to confirm
   the deployed transport, CORS configuration, and Neon connection all
   work together in the actual environment evaluators will hit - this is
   the same demonstration used in the Loom recording.
+
 - **Manual code review** of every generated file rather than only the
   parts that failed at runtime - checking that tool descriptions
   accurately state their safety requirements, that write paths are all
@@ -129,3 +166,8 @@ API is the same across both.
   auto-retried without human approval, but that auto-retry path itself is
   intentionally not built - flagged as a natural next step rather than
   something I ran out of time on unexpectedly.
+- The integration test suite (`pnpm test:integration`) requires `DATABASE_URL`
+  to be set and runs against the real Neon Postgres instance, so it is not
+  suitable for ephemeral CI environments without a database. The unit test
+  suite (`pnpm test`) runs without any database dependency and covers the
+  service-layer business logic in isolation.
